@@ -1,0 +1,20 @@
+{
+  "created_resources": [
+    {
+      "type": "iam_role",
+      "id": "projects/xenon-broker-513704-s9/roles/spannerGraphDataReadWriter"
+    },
+    {
+      "type": "service_account",
+      "id": "ingestion-copilot-sa@xenon-broker-513704-s9.iam.gserviceaccount.com"
+    },
+    {
+      "type": "service_account",
+      "id": "discovery-copilot-sa@xenon-broker-513704-s9.iam.gserviceaccount.com"
+    },
+    {
+      "type": "service_account",
+      "id": "pubsub-invoker-sa@xenon-broker-513704-s9.iam.gserviceaccount.com"
+    }
+  ]
+}
