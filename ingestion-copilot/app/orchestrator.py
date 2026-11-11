@@ -29,6 +29,7 @@ from common.parsers.documentai_client import (
     PageLimitExceededError,
 )
 from common.parsers.layout_extractor import (
+    EmptyDocumentExtractionError,
     NormalizedDocument,
     generate_document_id,
     normalize_parsed_document,
@@ -188,6 +189,19 @@ class PdfIngestionOrchestrator:
         current_stage = IngestionStage.NORMALIZING
         try:
             normalized_doc: NormalizedDocument = normalize_parsed_document(parsed_doc)
+        except EmptyDocumentExtractionError as exc:
+            elapsed_ms = (time.perf_counter() - start_time) * 1000.0
+            logger.error(f"Empty extraction for document '{gcs_uri}' at stage {current_stage}: {exc}")
+            return DocumentIngestionResult(
+                gcs_uri=gcs_uri,
+                status=IngestionStatus.FAILED,
+                stage=IngestionStage.NORMALIZING,
+                document_id=doc_id,
+                chunks_count=0,
+                error_message=str(exc),
+                error_type=type(exc).__name__,
+                duration_ms=elapsed_ms,
+            )
         except Exception as exc:
             elapsed_ms = (time.perf_counter() - start_time) * 1000.0
             logger.error(f"Failed to normalize document '{gcs_uri}' at stage {current_stage}: {exc}")
@@ -196,10 +210,36 @@ class PdfIngestionOrchestrator:
                 status=IngestionStatus.FAILED,
                 stage=IngestionStage.NORMALIZING,
                 document_id=doc_id,
+                chunks_count=0,
                 error_message=str(exc),
                 error_type=type(exc).__name__,
                 duration_ms=elapsed_ms,
             )
+
+        if not normalized_doc.chunks:
+            elapsed_ms = (time.perf_counter() - start_time) * 1000.0
+            msg = (
+                f"Document AI extraction yielded 0 chunks for '{gcs_uri}' "
+                f"(pages={normalized_doc.page_count}, raw_text_len={len(parsed_doc.text)}). "
+                f"Aborting persistence."
+            )
+            logger.error(msg)
+            return DocumentIngestionResult(
+                gcs_uri=gcs_uri,
+                status=IngestionStatus.FAILED,
+                stage=IngestionStage.NORMALIZING,
+                document_id=doc_id,
+                chunks_count=0,
+                error_message=msg,
+                error_type="EmptyDocumentExtractionError",
+                duration_ms=elapsed_ms,
+            )
+
+        logger.info(
+            f"Normalized '{gcs_uri}': {len(normalized_doc.chunks)} chunks, "
+            f"{normalized_doc.page_count} pages, {normalized_doc.table_count} tables, "
+            f"{normalized_doc.total_characters} characters."
+        )
 
         # 3. Transactional Spanner Persistence
         current_stage = IngestionStage.PERSISTING

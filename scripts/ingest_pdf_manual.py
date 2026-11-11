@@ -44,6 +44,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger("ingest_pdf_manual")
 
+# Suppress advisory OpenTelemetry/Cloud Monitoring missing instance_id warnings during local CLI runs
+logging.getLogger("opentelemetry").setLevel(logging.ERROR)
+logging.getLogger("google.cloud.monitoring").setLevel(logging.ERROR)
+
 
 class DryRunSpannerTransaction:
     """Read-only transaction wrapper that executes queries against Spanner while capturing and discarding write mutations."""

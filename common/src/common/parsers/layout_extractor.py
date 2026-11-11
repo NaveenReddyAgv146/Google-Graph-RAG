@@ -19,6 +19,12 @@ DEFAULT_MAX_CHUNK_CHARS = 2000
 DEFAULT_CHUNK_OVERLAP_CHARS = 200
 
 
+class EmptyDocumentExtractionError(ValueError):
+    """Raised when Document AI layout extraction yields zero chunks."""
+
+    pass
+
+
 @dataclass(frozen=True)
 class BoundingBox:
     """Normalized bounding box coordinates (0.0 to 1.0)."""
@@ -69,13 +75,15 @@ def extract_text_from_anchor(document_text: str, text_anchor: Any) -> str:
     return "".join(chunks)
 
 
-def extract_bounding_box(layout: Any) -> BoundingBox | None:
-    """Extracts normalized bounding box from a layout's bounding_poly if available."""
-    if not layout or not hasattr(layout, "bounding_poly"):
+def extract_bounding_box(layout_or_poly: Any) -> BoundingBox | None:
+    """Extracts normalized bounding box from a layout, bounding_poly, or direct vertices."""
+    if not layout_or_poly:
         return None
 
-    poly = layout.bounding_poly
+    poly = getattr(layout_or_poly, "bounding_poly", layout_or_poly)
     vertices = getattr(poly, "normalized_vertices", None)
+    if not vertices:
+        vertices = getattr(poly, "vertices", None)
     if not vertices:
         return None
 
@@ -163,6 +171,178 @@ def convert_table_to_markdown(document_text: str, table: Any) -> str:
     return "\n".join(lines)
 
 
+def extract_text_from_layout_blocks(blocks: Any) -> str:
+    """Recursively extracts plain text from a list of DocumentLayoutBlock objects."""
+    if not blocks:
+        return ""
+    texts: list[str] = []
+    for b in blocks:
+        tb = getattr(b, "text_block", None)
+        if tb:
+            t = getattr(tb, "text", "") or ""
+            if t.strip():
+                texts.append(t.strip())
+            # Child blocks inside text_block
+            child_blocks = getattr(tb, "blocks", None)
+            if child_blocks:
+                sub = extract_text_from_layout_blocks(child_blocks)
+                if sub:
+                    texts.append(sub)
+
+        lb = getattr(b, "list_block", None)
+        if lb:
+            for entry in getattr(lb, "list_entries", []) or []:
+                entry_blocks = getattr(entry, "blocks", []) or []
+                entry_text = extract_text_from_layout_blocks(entry_blocks)
+                if entry_text:
+                    texts.append(f"- {entry_text}")
+
+    return "\n".join(texts)
+
+
+def convert_layout_table_to_markdown(table_block: Any) -> str:
+    """Converts a DocumentLayout.DocumentLayoutBlock.LayoutTableBlock into Markdown."""
+    if not table_block:
+        return ""
+
+    header_rows = getattr(table_block, "header_rows", []) or []
+    body_rows = getattr(table_block, "body_rows", []) or []
+
+    if not header_rows and not body_rows:
+        return ""
+
+    def _extract_cells(row: Any) -> list[str]:
+        cells = getattr(row, "cells", []) or []
+        row_text = []
+        for cell in cells:
+            cell_blocks = getattr(cell, "blocks", []) or []
+            cell_str = extract_text_from_layout_blocks(cell_blocks)
+            clean_str = " ".join(cell_str.replace("|", "\\|").split())
+            row_text.append(clean_str or "")
+        return row_text
+
+    parsed_headers: list[str] = []
+    if header_rows:
+        parsed_headers = _extract_cells(header_rows[0])
+
+    parsed_body: list[list[str]] = [_extract_cells(r) for r in body_rows]
+
+    num_cols = len(parsed_headers)
+    for r in parsed_body:
+        num_cols = max(num_cols, len(r))
+
+    if num_cols == 0:
+        return ""
+
+    if not parsed_headers:
+        if parsed_body:
+            parsed_headers = parsed_body.pop(0)
+            while len(parsed_headers) < num_cols:
+                parsed_headers.append(f"Column {len(parsed_headers) + 1}")
+        else:
+            parsed_headers = [f"Column {i + 1}" for i in range(num_cols)]
+
+    while len(parsed_headers) < num_cols:
+        parsed_headers.append(f"Column {len(parsed_headers) + 1}")
+
+    lines = [
+        "| " + " | ".join(h or f"Column {i + 1}" for i, h in enumerate(parsed_headers)) + " |",
+        "| " + " | ".join(["---"] * num_cols) + " |",
+    ]
+
+    for row in parsed_body:
+        padded_row = list(row)
+        while len(padded_row) < num_cols:
+            padded_row.append("")
+        lines.append("| " + " | ".join(padded_row) + " |")
+
+    return "\n".join(lines)
+
+
+def extract_elements_from_document_layout(
+    document_layout: Any,
+    strip_headers_footers: bool = True,
+) -> list[LayoutElement]:
+    """Extracts LayoutElements from Document AI document_layout.blocks hierarchy."""
+    if not document_layout or not hasattr(document_layout, "blocks"):
+        return []
+
+    blocks = document_layout.blocks
+    if not blocks:
+        return []
+
+    elements: list[LayoutElement] = []
+
+    def _process_block(block: Any) -> None:
+        page_span = getattr(block, "page_span", None)
+        page_number = int(getattr(page_span, "page_start", 1) or 1)
+        bbox = extract_bounding_box(getattr(block, "bounding_box", None))
+
+        is_extreme_bbox = False
+        if strip_headers_footers and bbox:
+            if bbox.y_max <= 0.07 or bbox.y_min >= 0.93:
+                is_extreme_bbox = True
+
+        # 1. Text block
+        tb = getattr(block, "text_block", None)
+        if tb:
+            text = getattr(tb, "text", "") or ""
+            b_type = (getattr(tb, "type_", "TEXT") or "TEXT").upper()
+            if strip_headers_footers and (b_type in ("HEADER", "FOOTER") or is_extreme_bbox):
+                pass
+            elif text.strip():
+                elements.append(
+                    LayoutElement(
+                        element_type="TEXT",
+                        content=text.strip(),
+                        page_number=page_number,
+                        bounding_box=bbox,
+                    )
+                )
+
+            # Process nested child blocks inside text_block if present
+            for child in getattr(tb, "blocks", []) or []:
+                _process_block(child)
+
+        # 2. Table block
+        tbl = getattr(block, "table_block", None)
+        if tbl:
+            md_tbl = convert_layout_table_to_markdown(tbl)
+            if md_tbl.strip():
+                elements.append(
+                    LayoutElement(
+                        element_type="TABLE",
+                        content=md_tbl.strip(),
+                        page_number=page_number,
+                        bounding_box=bbox,
+                    )
+                )
+
+        # 3. List block
+        lb = getattr(block, "list_block", None)
+        if lb:
+            list_items: list[str] = []
+            for entry in getattr(lb, "list_entries", []) or []:
+                entry_blocks = getattr(entry, "blocks", []) or []
+                entry_text = extract_text_from_layout_blocks(entry_blocks)
+                if entry_text.strip():
+                    list_items.append(f"- {entry_text.strip()}")
+            if list_items:
+                elements.append(
+                    LayoutElement(
+                        element_type="TEXT",
+                        content="\n".join(list_items),
+                        page_number=page_number,
+                        bounding_box=bbox,
+                    )
+                )
+
+    for block in blocks:
+        _process_block(block)
+
+    return elements
+
+
 def generate_document_id(
     metadata: PdfMetadata | None = None,
     fallback_name: str = "",
@@ -185,8 +365,8 @@ def generate_chunk_id(
     chunk_index: int,
     modality: str = "TEXT",
 ) -> str:
-    """
-    Generates a deterministic ChunkId guaranteed <= 64 characters.
+    """Generates a deterministic ChunkId guaranteed <= 64 characters.
+
     Retains the full content-addressed document ID prefix without unnecessary truncation.
     Example: 'doc_e3b0c44298fc1c149afbf4c8996fb924_p01_t001'
     """
@@ -218,7 +398,7 @@ def split_oversized_text(text: str, max_chars: int, overlap_chars: int) -> list[
         else:
             if current_chunk:
                 chunks.append(current_chunk)
-            
+
             # If paragraph itself is larger than max_chars, split by words
             if len(para_clean) > max_chars:
                 words = para_clean.split(" ")
@@ -248,14 +428,12 @@ def extract_page_elements(
     page: Any,
     strip_headers_footers: bool = True,
 ) -> list[LayoutElement]:
-    """Extracts ordered layout elements (text paragraphs and tables) for a single page."""
+    """Extracts ordered layout elements (text paragraphs/blocks/lines and tables) for a single page."""
     page_number = int(getattr(page, "page_number", 1) or 1)
     elements: list[LayoutElement] = []
 
     # 1. Extract tables
     tables = getattr(page, "tables", []) or []
-    table_anchors = set()
-
     for tbl in tables:
         md_table = convert_table_to_markdown(document_text, tbl)
         if md_table.strip():
@@ -269,10 +447,15 @@ def extract_page_elements(
                 )
             )
 
-    # 2. Extract paragraphs / blocks
-    paragraphs = getattr(page, "paragraphs", []) or []
-    for para in paragraphs:
-        layout = getattr(para, "layout", None)
+    # 2. Extract text: paragraphs -> blocks -> lines (hierarchy of fallback)
+    text_containers = getattr(page, "paragraphs", []) or []
+    if not text_containers:
+        text_containers = getattr(page, "blocks", []) or []
+    if not text_containers:
+        text_containers = getattr(page, "lines", []) or []
+
+    for item in text_containers:
+        layout = getattr(item, "layout", None)
         anchor = getattr(layout, "text_anchor", None) if layout else None
         text_content = extract_text_from_anchor(document_text, anchor).strip()
         if not text_content:
@@ -313,14 +496,20 @@ def normalize_parsed_document(
     chunk_overlap_chars: int = DEFAULT_CHUNK_OVERLAP_CHARS,
     strip_headers_footers: bool = True,
 ) -> NormalizedDocument:
-    """
-    Normalizes a ParsedDocument into a DocumentNode and layout-aware ChunkNode records.
+    """Normalizes a ParsedDocument into a DocumentNode and layout-aware ChunkNode records.
+
+    Extraction hierarchy:
+    1. Document AI Layout Parser document_layout.blocks (headings, paragraphs, lists, tables).
+    2. Page-level extraction: page.tables + (page.paragraphs -> page.blocks -> page.lines).
+    3. Global document text fallback: split doc.text into paragraphs if structure is absent.
 
     Invariants:
     - Stable, deterministic DocumentId and ChunkId.
     - Preserves page numbers and layout modalities ('TEXT' vs 'TABLE').
     - Leaves embedding_768 = None strictly (zero dummy embeddings).
     - Safely skips empty pages; splits oversized blocks.
+    - Emits structured diagnostic statistics.
+    - Raises EmptyDocumentExtractionError if extraction yields 0 chunks.
     """
     meta = parsed_doc.metadata
     doc_id = document_id or generate_document_id(meta, fallback_name=parsed_doc.processor_name)
@@ -343,27 +532,86 @@ def normalize_parsed_document(
         drive_file_id=None,
     )
 
+    doc = parsed_doc.raw_document
+    doc_text = getattr(doc, "text", "") or parsed_doc.text or ""
+    pages = getattr(doc, "pages", []) or []
+    layout_blocks_count = 0
+
+    all_elements: list[LayoutElement] = []
+
+    # Strategy 1: Document AI Layout Parser document_layout.blocks
+    doc_layout = getattr(doc, "document_layout", None)
+    if doc_layout and hasattr(doc_layout, "blocks") and len(doc_layout.blocks) > 0:
+        layout_blocks_count = len(doc_layout.blocks)
+        layout_elements = extract_elements_from_document_layout(
+            doc_layout,
+            strip_headers_footers=strip_headers_footers,
+        )
+        if layout_elements:
+            all_elements.extend(layout_elements)
+
+    # Strategy 2: Page-level extraction (paragraphs -> blocks -> lines + tables)
+    if not all_elements and pages:
+        for page in pages:
+            page_elements = extract_page_elements(
+                doc_text,
+                page,
+                strip_headers_footers=strip_headers_footers,
+            )
+            all_elements.extend(page_elements)
+
+    # Strategy 3: Global document text fallback
+    if not all_elements and doc_text.strip():
+        logger.warning(
+            f"No layout elements or page paragraphs found for document '{doc_id}'; "
+            f"falling back to splitting raw document text ({len(doc_text)} chars)."
+        )
+        for para in doc_text.split("\n\n"):
+            clean_para = para.strip()
+            if clean_para:
+                all_elements.append(
+                    LayoutElement(
+                        element_type="TEXT",
+                        content=clean_para,
+                        page_number=1,
+                        bounding_box=None,
+                    )
+                )
+
+    element_text_count = sum(1 for el in all_elements if el.element_type == "TEXT")
+    element_table_count = sum(1 for el in all_elements if el.element_type == "TABLE")
+
+    # Group elements by page
+    elements_by_page: dict[int, list[LayoutElement]] = {}
+    for el in all_elements:
+        elements_by_page.setdefault(el.page_number, []).append(el)
+
+    detected_page_count = parsed_doc.page_count
+    if not detected_page_count or detected_page_count == 0:
+        detected_page_count = len(pages) if pages else (max(elements_by_page.keys()) if elements_by_page else 1)
+
+    # Order of pages to process
+    if elements_by_page:
+        sorted_page_nums = sorted(elements_by_page.keys())
+    elif pages:
+        sorted_page_nums = [int(getattr(p, "page_number", i + 1) or (i + 1)) for i, p in enumerate(pages)]
+    else:
+        sorted_page_nums = [1]
+
     chunks: list[ChunkNode] = []
     chunk_counter = 1
     table_count = 0
     total_chars = 0
 
-    doc = parsed_doc.raw_document
-    pages = getattr(doc, "pages", []) or []
-    doc_text = getattr(doc, "text", "") or ""
-
-    for page in pages:
-        p_num = int(getattr(page, "page_number", 1) or 1)
-        elements = extract_page_elements(
-            doc_text,
-            page,
-            strip_headers_footers=strip_headers_footers,
-        )
+    for p_num in sorted_page_nums:
+        page_elements = elements_by_page.get(p_num, [])
+        # Sort elements by vertical position on page (top-to-bottom reading order)
+        page_elements.sort(key=lambda el: el.bounding_box.y_min if el.bounding_box else 0.0)
 
         current_text_buf: list[str] = []
         current_text_len = 0
 
-        for el in elements:
+        for el in page_elements:
             if el.element_type == "TABLE":
                 # Flush pending text buffer before table
                 if current_text_buf:
@@ -470,10 +718,30 @@ def normalize_parsed_document(
                 chunk_counter += 1
                 total_chars += len(sc)
 
+    logger.info(
+        "Document parsing diagnostics: doc_id='%s', pages=%d, raw_text_len=%d, "
+        "layout_blocks=%d, text_elements=%d, table_elements=%d, normalized_chunks=%d, total_chunk_chars=%d",
+        doc_id,
+        detected_page_count,
+        len(doc_text),
+        layout_blocks_count,
+        element_text_count,
+        element_table_count,
+        len(chunks),
+        total_chars,
+    )
+
+    if len(chunks) == 0:
+        raise EmptyDocumentExtractionError(
+            f"Document AI layout extraction yielded 0 chunks for document '{doc_id}' "
+            f"(pages={detected_page_count}, raw_text_len={len(doc_text)}). "
+            f"Extraction cannot produce empty document records."
+        )
+
     return NormalizedDocument(
         document_node=doc_node,
         chunks=chunks,
-        page_count=len(pages),
+        page_count=detected_page_count,
         table_count=table_count,
         total_characters=total_chars,
     )

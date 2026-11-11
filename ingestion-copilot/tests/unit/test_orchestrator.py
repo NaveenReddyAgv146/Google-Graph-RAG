@@ -599,3 +599,112 @@ def test_ingest_bucket_pdfs_empty():
     assert summary.successful == 0
     assert summary.failed == 0
     assert len(summary.results) == 0
+
+
+# ============================================================================
+# 11. Empty Extraction Guard & Document Layout Orchestration
+# ============================================================================
+
+
+def test_empty_extraction_fails_without_persisting():
+    """Verifies that an empty extraction (0 chunks) fails immediately and aborts Spanner persistence."""
+    uri = "gs://sales-discovery-mvp/empty.pdf"
+    pdf_bytes = make_sample_pdf_bytes("Empty")
+    mock_storage = make_mock_storage_client({uri: pdf_bytes})
+
+    # Mock DocAI returning completely empty Document (0 text, 0 paragraphs, 0 layout blocks)
+    mock_docai = MagicMock(spec=DocumentAiLayoutClient)
+    empty_doc = MagicMock()
+    empty_doc.text = ""
+    empty_doc.pages = [MagicMock(page_number=1, paragraphs=[], blocks=[], lines=[], tables=[])]
+    empty_doc.document_layout = None
+
+    def empty_process(downloaded_pdf: DownloadedPdf) -> ParsedDocument:
+        return ParsedDocument(
+            raw_document=empty_doc,
+            metadata=downloaded_pdf.metadata,
+            processor_name="projects/123/locations/us/processors/layout",
+            page_count=1,
+            text="",
+        )
+
+    mock_docai.process.side_effect = empty_process
+    mock_db = MockSpannerDatabase()
+
+    orchestrator = PdfIngestionOrchestrator(
+        docai_client=mock_docai,
+        spanner_database=mock_db,
+        storage_client=mock_storage,
+    )
+
+    result = orchestrator.ingest_pdf(uri)
+
+    assert result.status == IngestionStatus.FAILED
+    assert result.stage == IngestionStage.NORMALIZING
+    assert result.chunks_count == 0
+    assert "EmptyDocumentExtractionError" in result.error_type
+    assert "0 chunks" in result.error_message
+    # Critical invariant: Spanner transaction must NEVER have been called!
+    assert mock_db.transaction_calls == 0
+
+
+def test_document_layout_blocks_orchestrated_successfully():
+    """Verifies that a document with modern DocumentLayout blocks (and empty page.paragraphs) ingests successfully."""
+    uri = "gs://sales-discovery-mvp/layout_resume.pdf"
+    pdf_bytes = make_sample_pdf_bytes("Resume")
+    mock_storage = make_mock_storage_client({uri: pdf_bytes})
+
+    # Build Document with document_layout.blocks
+    mock_docai = MagicMock(spec=DocumentAiLayoutClient)
+
+    tb = MagicMock()
+    tb.text = "Senior Cloud Architect - Resume Content"
+    tb.type_ = "paragraph"
+    tb.blocks = []
+
+    block = MagicMock()
+    block.text_block = tb
+    block.table_block = None
+    block.list_block = None
+    block.page_span.page_start = 1
+    block.bounding_box = None
+
+    doc_layout = MagicMock()
+    doc_layout.blocks = [block]
+
+    mock_doc = MagicMock()
+    mock_doc.text = ""
+    mock_doc.pages = [MagicMock(page_number=1, paragraphs=[])]  # 0 paragraphs
+    mock_doc.document_layout = doc_layout
+
+    def layout_process(downloaded_pdf: DownloadedPdf) -> ParsedDocument:
+        return ParsedDocument(
+            raw_document=mock_doc,
+            metadata=downloaded_pdf.metadata,
+            processor_name="projects/123/locations/us/processors/layout",
+            page_count=1,
+            text="",
+        )
+
+    mock_docai.process.side_effect = layout_process
+    mock_txn = MockSpannerTransaction()
+    mock_db = MockSpannerDatabase(mock_txn)
+
+    orchestrator = PdfIngestionOrchestrator(
+        docai_client=mock_docai,
+        spanner_database=mock_db,
+        storage_client=mock_storage,
+    )
+
+    result = orchestrator.ingest_pdf(uri)
+
+    assert result.status == IngestionStatus.SUCCESS
+    assert result.stage == IngestionStage.COMPLETED
+    assert result.chunks_count == 1
+    assert mock_db.transaction_calls == 1
+    # Check that chunks and documents were inserted into Spanner
+    tables_inserted = [ins["table"] for ins in mock_txn.inserts]
+    assert "Documents" in tables_inserted
+    assert "EvidenceChunks" in tables_inserted
+    assert "DocumentContainsChunk" in tables_inserted
+

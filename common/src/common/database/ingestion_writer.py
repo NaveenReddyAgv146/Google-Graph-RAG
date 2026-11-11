@@ -144,6 +144,11 @@ def persist_normalized_document(
     chunks = normalized_doc.chunks
 
     # Pre-transaction schema validation
+    if not chunks:
+        raise SchemaValidationError(
+            f"Cannot persist NormalizedDocument for '{doc_node.document_id}' with 0 chunks: "
+            "empty extraction indicates failure."
+        )
     validate_document_fields(doc_node)
     for chk in chunks:
         validate_chunk_fields(chk)

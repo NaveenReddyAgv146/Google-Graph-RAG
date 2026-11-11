@@ -299,3 +299,35 @@ def test_manual_runner_default_client_initialization_dry_run():
         # Verify orchestrator received DryRunSpannerDatabase
         _, kwargs = mock_orch_cls.call_args
         assert isinstance(kwargs["spanner_database"], manual_runner.DryRunSpannerDatabase)
+
+
+def test_manual_runner_empty_extraction_exit_code_non_zero(capsys):
+    """Verifies that an empty extraction (0 chunks) exits with code 2 (FAILED) and displays diagnostics."""
+    uri = "gs://sales-discovery-mvp/empty_document.pdf"
+    mock_result = DocumentIngestionResult(
+        gcs_uri=uri,
+        status=IngestionStatus.FAILED,
+        stage=IngestionStage.NORMALIZING,
+        document_id="doc_empty123",
+        chunks_count=0,
+        error_message="Document AI layout extraction yielded 0 chunks for document 'doc_empty123' (pages=1, raw_text_len=0). Aborting persistence.",
+        error_type="EmptyDocumentExtractionError",
+        duration_ms=120.0,
+    )
+
+    mock_orch = MagicMock(spec=PdfIngestionOrchestrator)
+    mock_orch.ingest_pdf.return_value = mock_result
+
+    res, exit_code = manual_runner.run_manual_ingestion(uri, dry_run=True, orchestrator=mock_orch)
+
+    assert exit_code == 2
+    assert res.status == IngestionStatus.FAILED
+    assert res.chunks_count == 0
+
+    captured = capsys.readouterr().out
+    assert "Status:             FAILED" in captured
+    assert "Final Stage:        NORMALIZING" in captured
+    assert "Total Chunks:       0" in captured
+    assert "Error Type:         EmptyDocumentExtractionError" in captured
+    assert "0 chunks" in captured
+

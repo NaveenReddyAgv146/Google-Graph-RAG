@@ -9,8 +9,11 @@ import pytest
 from common.parsers.documentai_client import ParsedDocument
 from common.parsers.layout_extractor import (
     BoundingBox,
+    EmptyDocumentExtractionError,
+    convert_layout_table_to_markdown,
     convert_table_to_markdown,
     extract_bounding_box,
+    extract_elements_from_document_layout,
     extract_page_elements,
     extract_text_from_anchor,
     generate_chunk_id,
@@ -77,16 +80,87 @@ class MockPage:
         page_number: int,
         paragraphs: list[MockParagraph] | None = None,
         tables: list[MockTable] | None = None,
+        blocks: list[MockParagraph] | None = None,
+        lines: list[MockParagraph] | None = None,
     ):
         self.page_number = page_number
         self.paragraphs = paragraphs or []
         self.tables = tables or []
+        self.blocks = blocks or []
+        self.lines = lines or []
+
+
+class MockLayoutTextBlock:
+    def __init__(self, text: str, type_: str = "paragraph", blocks: list | None = None):
+        self.text = text
+        self.type_ = type_
+        self.blocks = blocks or []
+
+
+class MockLayoutTableCell:
+    def __init__(self, text: str):
+        self.blocks = [MockLayoutBlock(text_block=MockLayoutTextBlock(text))]
+
+
+class MockLayoutTableRow:
+    def __init__(self, cell_texts: list[str]):
+        self.cells = [MockLayoutTableCell(t) for t in cell_texts]
+
+
+class MockLayoutTableBlock:
+    def __init__(self, header_rows: list[list[str]], body_rows: list[list[str]]):
+        self.header_rows = [MockLayoutTableRow(r) for r in header_rows]
+        self.body_rows = [MockLayoutTableRow(r) for r in body_rows]
+
+
+class MockListEntry:
+    def __init__(self, text: str):
+        self.blocks = [MockLayoutBlock(text_block=MockLayoutTextBlock(text))]
+
+
+class MockLayoutListBlock:
+    def __init__(self, entries: list[str], type_: str = "unordered"):
+        self.list_entries = [MockListEntry(e) for e in entries]
+        self.type_ = type_
+
+
+class MockPageSpan:
+    def __init__(self, page_start: int = 1, page_end: int = 1):
+        self.page_start = page_start
+        self.page_end = page_end
+
+
+class MockLayoutBlock:
+    def __init__(
+        self,
+        text_block: MockLayoutTextBlock | None = None,
+        table_block: MockLayoutTableBlock | None = None,
+        list_block: MockLayoutListBlock | None = None,
+        page_start: int = 1,
+        vertices: list[tuple[float, float]] | None = None,
+    ):
+        self.text_block = text_block
+        self.table_block = table_block
+        self.list_block = list_block
+        self.page_span = MockPageSpan(page_start=page_start)
+        self.bounding_box = MockBoundingPoly(vertices) if vertices else None
+
+
+class MockDocumentLayout:
+    def __init__(self, blocks: list[MockLayoutBlock]):
+        self.blocks = blocks
 
 
 class MockDocAiDoc:
-    def __init__(self, text: str, pages: list[MockPage]):
+    def __init__(
+        self,
+        text: str,
+        pages: list[MockPage] | None = None,
+        document_layout: MockDocumentLayout | None = None,
+    ):
         self.text = text
-        self.pages = pages
+        self.pages = pages or []
+        self.document_layout = document_layout
 
 
 # ============================================================================
@@ -380,4 +454,217 @@ def test_repeated_headers_footers_stripping():
     assert len(norm_kept.chunks) == 1
     assert "REPEATED HEADER" in norm_kept.chunks[0].text_content
     assert "REPEATED FOOTER" in norm_kept.chunks[0].text_content
+
+
+# ============================================================================
+# 5. Document AI Layout Parser & Regression Tests
+# ============================================================================
+
+
+def test_document_layout_blocks_extraction():
+    """Tests extracting structured content directly from document_layout.blocks hierarchy."""
+    tb1 = MockLayoutTextBlock(text="Professional Summary", type_="heading-1")
+    tb2 = MockLayoutTextBlock(text="Experienced Staff AI Engineer specializing in distributed RAG systems.", type_="paragraph")
+    block1 = MockLayoutBlock(text_block=tb1, page_start=1, vertices=[(0.1, 0.1), (0.9, 0.1), (0.9, 0.15), (0.1, 0.15)])
+    block2 = MockLayoutBlock(text_block=tb2, page_start=1, vertices=[(0.1, 0.16), (0.9, 0.16), (0.9, 0.25), (0.1, 0.25)])
+
+    # List block
+    list_block = MockLayoutListBlock(entries=["Designed knowledge plane schema", "Optimized vector search"])
+    block3 = MockLayoutBlock(list_block=list_block, page_start=1)
+
+    # Table block
+    tbl_block = MockLayoutTableBlock(
+        header_rows=[["Language", "Level"]],
+        body_rows=[["Python", "Expert"], ["Go", "Proficient"]],
+    )
+    block4 = MockLayoutBlock(table_block=tbl_block, page_start=2)
+
+    doc_layout = MockDocumentLayout(blocks=[block1, block2, block3, block4])
+    raw_doc = MockDocAiDoc(text="", pages=[], document_layout=doc_layout)
+
+    parsed = ParsedDocument(
+        raw_document=raw_doc,
+        metadata=None,
+        processor_name="projects/123/locations/us/processors/d79bb791cfba8a30",
+        page_count=2,
+        text="",
+    )
+
+    norm = normalize_parsed_document(parsed)
+    assert norm.page_count == 2
+    assert norm.table_count == 1
+    assert len(norm.chunks) == 2  # Page 1 text+list chunk, Page 2 table chunk
+
+    # Page 1 chunk
+    p1_chunk = norm.chunks[0]
+    assert p1_chunk.page_number == 1
+    assert p1_chunk.modality == "TEXT"
+    assert "Professional Summary" in p1_chunk.text_content
+    assert "Experienced Staff AI Engineer" in p1_chunk.text_content
+    assert "- Designed knowledge plane schema" in p1_chunk.text_content
+    assert p1_chunk.embedding_768 is None
+
+    # Page 2 table chunk
+    p2_chunk = norm.chunks[1]
+    assert p2_chunk.page_number == 2
+    assert p2_chunk.modality == "TABLE"
+    assert "| Language | Level |" in p2_chunk.text_content
+    assert "| Python | Expert |" in p2_chunk.text_content
+    assert p2_chunk.embedding_768 is None
+
+
+def test_page_blocks_fallback_when_paragraphs_empty():
+    """Tests extracting from page.blocks when page.paragraphs is empty."""
+    doc_text = "Section TitleBlock content line 1. Block content line 2."
+    b1 = MockParagraph([(0, 13)], vertices=[(0.1, 0.1), (0.9, 0.1), (0.9, 0.15), (0.1, 0.15)])
+    b2 = MockParagraph([(13, 56)], vertices=[(0.1, 0.16), (0.9, 0.16), (0.9, 0.3), (0.1, 0.3)])
+
+    # paragraphs is empty, blocks is populated
+    page = MockPage(page_number=1, paragraphs=[], blocks=[b1, b2])
+    raw_doc = MockDocAiDoc(text=doc_text, pages=[page])
+
+    parsed = ParsedDocument(
+        raw_document=raw_doc,
+        metadata=None,
+        processor_name="test-proc",
+        page_count=1,
+        text=doc_text,
+    )
+
+    norm = normalize_parsed_document(parsed)
+    assert len(norm.chunks) == 1
+    assert "Section Title" in norm.chunks[0].text_content
+    assert "Block content line 1" in norm.chunks[0].text_content
+
+
+def test_page_lines_fallback_when_blocks_and_paragraphs_empty():
+    """Tests extracting from page.lines when page.paragraphs and page.blocks are empty."""
+    doc_text = "Single line of text"
+    line = MockParagraph([(0, 19)], vertices=[(0.1, 0.2), (0.9, 0.2), (0.9, 0.25), (0.1, 0.25)])
+
+    # paragraphs and blocks empty, lines populated
+    page = MockPage(page_number=1, paragraphs=[], blocks=[], lines=[line])
+    raw_doc = MockDocAiDoc(text=doc_text, pages=[page])
+
+    parsed = ParsedDocument(
+        raw_document=raw_doc,
+        metadata=None,
+        processor_name="test-proc",
+        page_count=1,
+        text=doc_text,
+    )
+
+    norm = normalize_parsed_document(parsed)
+    assert len(norm.chunks) == 1
+    assert norm.chunks[0].text_content == "Single line of text"
+
+
+def test_raw_text_fallback_when_pages_have_no_text_containers():
+    """Tests fallback to doc.text when page structures contain no text containers."""
+    doc_text = "Paragraph One.\n\nParagraph Two."
+    # Page with no paragraphs, blocks, lines, or tables
+    page = MockPage(page_number=1, paragraphs=[], blocks=[], lines=[], tables=[])
+    raw_doc = MockDocAiDoc(text=doc_text, pages=[page])
+
+    parsed = ParsedDocument(
+        raw_document=raw_doc,
+        metadata=None,
+        processor_name="test-proc",
+        page_count=1,
+        text=doc_text,
+    )
+
+    norm = normalize_parsed_document(parsed)
+    assert len(norm.chunks) == 1
+    assert "Paragraph One." in norm.chunks[0].text_content
+    assert "Paragraph Two." in norm.chunks[0].text_content
+
+
+def test_empty_document_raises_extraction_error():
+    """Tests that a genuinely empty document raises EmptyDocumentExtractionError."""
+    # Completely empty doc
+    raw_doc = MockDocAiDoc(text="", pages=[MockPage(page_number=1)])
+    parsed = ParsedDocument(
+        raw_document=raw_doc,
+        metadata=None,
+        processor_name="test-proc",
+        page_count=1,
+        text="",
+    )
+
+    with pytest.raises(EmptyDocumentExtractionError) as exc_info:
+        normalize_parsed_document(parsed)
+    assert "yielded 0 chunks" in str(exc_info.value)
+
+
+def test_realistic_resume_document_layout_fixture():
+    """Tests a realistic Document AI Layout Parser response for a resume with columns and skills table."""
+    blocks = [
+        # Candidate Header
+        MockLayoutBlock(
+            text_block=MockLayoutTextBlock(text="Naveen Reddy Kambham | Senior Cloud Architect", type_="title"),
+            page_start=1,
+            vertices=[(0.1, 0.05), (0.9, 0.05), (0.9, 0.08), (0.1, 0.08)],
+        ),
+        # Experience Section Header
+        MockLayoutBlock(
+            text_block=MockLayoutTextBlock(text="Professional Experience", type_="heading-1"),
+            page_start=1,
+            vertices=[(0.1, 0.12), (0.9, 0.12), (0.9, 0.15), (0.1, 0.15)],
+        ),
+        # Experience Bullets (List block)
+        MockLayoutBlock(
+            list_block=MockLayoutListBlock(
+                entries=[
+                    "Spearheaded enterprise GraphRAG implementation across multi-region GCP Spanner.",
+                    "Architected Document AI layout extraction pipelines processing 10k+ PDFs daily.",
+                ]
+            ),
+            page_start=1,
+            vertices=[(0.1, 0.16), (0.9, 0.16), (0.9, 0.35), (0.1, 0.35)],
+        ),
+        # Skills Table
+        MockLayoutBlock(
+            table_block=MockLayoutTableBlock(
+                header_rows=[["Domain", "Technologies"]],
+                body_rows=[
+                    ["Cloud", "Google Cloud, Cloud Spanner, Document AI, Cloud Run"],
+                    ["AI / ML", "Gemini 2.5, OpenTelemetry, Vector Embeddings"],
+                ],
+            ),
+            page_start=1,
+            vertices=[(0.1, 0.40), (0.9, 0.40), (0.9, 0.60), (0.1, 0.60)],
+        ),
+    ]
+
+    doc_layout = MockDocumentLayout(blocks=blocks)
+    # Notice pages has 0 paragraphs (simulating real Layout Parser response!)
+    raw_doc = MockDocAiDoc(text="", pages=[MockPage(page_number=1, paragraphs=[])], document_layout=doc_layout)
+
+    parsed = ParsedDocument(
+        raw_document=raw_doc,
+        metadata=PdfMetadata(
+            bucket="sales-discovery-mvp",
+            name="resumes/naveen_reddy.pdf",
+            size_bytes=295000,
+            generation=12345,
+            content_type="application/pdf",
+            sha256_hash="e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            gcs_uri="gs://sales-discovery-mvp/resumes/naveen_reddy.pdf",
+        ),
+        processor_name="projects/123/locations/us/processors/d79bb791cfba8a30",
+        page_count=1,
+        text="",
+    )
+
+    norm = normalize_parsed_document(parsed)
+    assert norm.page_count == 1
+    assert norm.table_count == 1
+    assert len(norm.chunks) == 2  # Text chunk (title + experience) + Table chunk (skills)
+    assert norm.chunks[0].modality == "TEXT"
+    assert norm.chunks[1].modality == "TABLE"
+    assert "Senior Cloud Architect" in norm.chunks[0].text_content
+    assert "Cloud Spanner" in norm.chunks[1].text_content
+    assert all(chk.embedding_768 is None for chk in norm.chunks)
+
 
