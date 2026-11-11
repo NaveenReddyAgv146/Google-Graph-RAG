@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from google.cloud import spanner
@@ -26,6 +26,12 @@ class SchemaValidationError(IngestionPersistenceError):
     pass
 
 
+class ChunkOwnershipConflictError(IngestionPersistenceError):
+    """Raised when a chunk ID matches an existing chunk belonging to a different DocumentId."""
+
+    pass
+
+
 @dataclass(frozen=True)
 class IngestionWriteResult:
     """Detailed summary of the atomic persistence transaction."""
@@ -38,6 +44,7 @@ class IngestionWriteResult:
     edges_inserted: int
     edges_unchanged: int
     total_mutations: int
+    superseded_documents: list[str] = field(default_factory=list)
 
 
 def validate_document_fields(doc: DocumentNode) -> None:
@@ -129,6 +136,9 @@ def persist_normalized_document(
     4. Handles existing chunks without erasing vector embeddings.
     5. Leaves Embedding768 strictly NULL on new chunks.
     6. Automatically retries Wound-Wait lock conflicts via database.run_in_transaction.
+    7. Verifies chunk ownership before update: raises ChunkOwnershipConflictError on mismatch.
+    8. Atomically supersedes older versions of the same GCS URI upon new content commit.
+    9. Preserves historical documents, chunks, and edges without deletion.
     """
     doc_node = normalized_doc.document_node
     chunks = normalized_doc.chunks
@@ -221,20 +231,64 @@ def persist_normalized_document(
                 )
                 doc_action = "UPDATED"
 
-        # 2. Read existing chunks for this document
-        chunk_sql = """
-        SELECT ChunkId, TextContent, Modality, PageNumber
-        FROM EvidenceChunks
-        WHERE DocumentId = @doc_id
-        """
-        existing_chunks = {
-            r[0]: (r[1], r[2], r[3])
+        # 2. Reconcile Changed-Source PDF Versioning (Atomic Supersession)
+        # When a genuinely new content version is inserted for an existing GCS URI,
+        # atomically mark prior processed versions as SUPERSEDED.
+        superseded_documents: list[str] = []
+        if doc_action == "INSERTED" and doc_node.gcs_uri:
+            supersede_sql = """
+            SELECT DocumentId
+            FROM Documents
+            WHERE GcsUri = @gcs_uri
+              AND DocumentId != @new_doc_id
+              AND Status = 'PROCESSED'
+            """
+            older_docs = list(
+                transaction.execute_sql(
+                    supersede_sql,
+                    params={
+                        "gcs_uri": doc_node.gcs_uri,
+                        "new_doc_id": doc_id,
+                    },
+                    param_types={
+                        "gcs_uri": spanner.param_types.STRING,
+                        "new_doc_id": spanner.param_types.STRING,
+                    },
+                )
+            )
+            for old_row in older_docs:
+                old_id = old_row[0]
+                superseded_documents.append(old_id)
+
+            if superseded_documents:
+                transaction.update(
+                    "Documents",
+                    columns=["DocumentId", "Status"],
+                    values=[[old_id, "SUPERSEDED"] for old_id in superseded_documents],
+                )
+
+        # 3. Read existing chunks and enforce Chunk Ownership Protection
+        existing_chunks: dict[str, tuple[str, str, str, int | None]] = {}
+        if chunks:
+            chunk_ids = [chk.chunk_id for chk in chunks]
+            chunk_sql = """
+            SELECT ChunkId, DocumentId, TextContent, Modality, PageNumber
+            FROM EvidenceChunks
+            WHERE ChunkId IN UNNEST(@chunk_ids)
+            """
             for r in transaction.execute_sql(
                 chunk_sql,
-                params={"doc_id": doc_id},
-                param_types={"doc_id": spanner.param_types.STRING},
-            )
-        }
+                params={"chunk_ids": chunk_ids},
+                param_types={"chunk_ids": spanner.param_types.Array(spanner.param_types.STRING)},
+            ):
+                c_id, stored_doc_id, text, modality, page_num = r[0], r[1], r[2], r[3], r[4]
+                # Chunk Ownership Protection: verify chunk belongs to this document
+                if stored_doc_id != doc_id:
+                    raise ChunkOwnershipConflictError(
+                        f"Chunk '{c_id}' is already owned by Document '{stored_doc_id}', "
+                        f"cannot be reassigned or overwritten by Document '{doc_id}'."
+                    )
+                existing_chunks[c_id] = (stored_doc_id, text, modality, page_num)
 
         chunks_inserted = 0
         chunks_updated = 0
@@ -262,7 +316,7 @@ def persist_normalized_document(
                 )
                 chunks_inserted += 1
             else:
-                ex_text, ex_modality, ex_page = existing_chunks[chk.chunk_id]
+                _, ex_text, ex_modality, ex_page = existing_chunks[chk.chunk_id]
                 if (
                     chk.text_content != ex_text
                     or chk.modality != ex_modality
@@ -307,7 +361,7 @@ def persist_normalized_document(
                 values=updated_chunks_values,
             )
 
-        # 3. Read existing DocumentContainsChunk edges
+        # 4. Read existing DocumentContainsChunk edges
         edge_sql = """
         SELECT ChunkId
         FROM DocumentContainsChunk
@@ -340,15 +394,17 @@ def persist_normalized_document(
                 values=new_edge_values,
             )
 
+        superseded_count = len(superseded_documents)
         total_mutations = (
             (1 if doc_action in ("INSERTED", "UPDATED") else 0)
+            + superseded_count
             + chunks_inserted
             + chunks_updated
             + edges_inserted
         )
 
         logger.info(
-            f"Document '{doc_id}' persisted: doc={doc_action}, "
+            f"Document '{doc_id}' persisted: doc={doc_action}, superseded={superseded_count}, "
             f"chunks(+{chunks_inserted}, ~{chunks_updated}, ={chunks_unchanged}), "
             f"edges(+{edges_inserted}, ={edges_unchanged}), total_mutations={total_mutations}"
         )
@@ -362,6 +418,8 @@ def persist_normalized_document(
             edges_inserted=edges_inserted,
             edges_unchanged=edges_unchanged,
             total_mutations=total_mutations,
+            superseded_documents=superseded_documents,
         )
 
     return database.run_in_transaction(_txn_callback)
+

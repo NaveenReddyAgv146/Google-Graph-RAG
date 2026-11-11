@@ -9,6 +9,7 @@ import pytest
 from google.api_core.exceptions import Aborted
 
 from common.database.ingestion_writer import (
+    ChunkOwnershipConflictError,
     IngestionWriteResult,
     SchemaValidationError,
     persist_normalized_document,
@@ -217,8 +218,8 @@ def test_rerun_unchanged_idempotency():
                 ]
             ],
             "FROM EvidenceChunks": [
-                [c1.chunk_id, c1.text_content, c1.modality, c1.page_number],
-                [c2.chunk_id, c2.text_content, c2.modality, c2.page_number],
+                [c1.chunk_id, c1.document_id, c1.text_content, c1.modality, c1.page_number],
+                [c2.chunk_id, c2.document_id, c2.text_content, c2.modality, c2.page_number],
             ],
             "FROM DocumentContainsChunk": [
                 [c1.chunk_id],
@@ -237,6 +238,7 @@ def test_rerun_unchanged_idempotency():
     assert result.edges_inserted == 0
     assert result.edges_unchanged == 2
     assert result.total_mutations == 0
+    assert result.superseded_documents == []
 
     # Zero mutation buffers
     assert len(txn.inserts) == 0
@@ -272,7 +274,7 @@ def test_partial_updates_and_field_preservation():
                 ]
             ],
             "FROM EvidenceChunks": [
-                [c1.chunk_id, "Old outdated chunk text", c1.modality, c1.page_number],
+                [c1.chunk_id, c1.document_id, "Old outdated chunk text", c1.modality, c1.page_number],
                 # c2 not in DB
             ],
             "FROM DocumentContainsChunk": [
@@ -292,6 +294,7 @@ def test_partial_updates_and_field_preservation():
     assert result.edges_inserted == 1   # edge for c2 inserted
     assert result.edges_unchanged == 1  # edge for c1 unchanged
     assert result.total_mutations == 4  # 1 doc upd + 1 chk ins + 1 chk upd + 1 edge ins
+    assert result.superseded_documents == []
 
     # Check document update columns: must NOT include DriveFileId or RepoId
     doc_upd = next(u for u in txn.updates if u["table"] == "Documents")
@@ -328,3 +331,173 @@ def test_transaction_failure_raises():
 
     with pytest.raises(RuntimeError, match="Spanner internal error"):
         persist_normalized_document(mock_db, sample)
+
+
+# ============================================================================
+# 6. Chunk Ownership Protection Tests
+# ============================================================================
+
+
+def test_chunk_ownership_conflict_raises():
+    """Verify attempting to overwrite or reassign a chunk owned by another document raises ChunkOwnershipConflictError."""
+    sample = make_sample_doc()
+    doc = sample.document_node
+    c1, _ = sample.chunks
+
+    # DB state: chunk c1 exists, but DocumentId in DB is "doc_foreign_owner" (not doc.document_id)
+    txn = MockTransaction(
+        query_responses={
+            "FROM EvidenceChunks": [
+                [c1.chunk_id, "doc_foreign_owner", c1.text_content, c1.modality, c1.page_number],
+            ],
+        }
+    )
+    db = MockDatabase(txn)
+
+    with pytest.raises(ChunkOwnershipConflictError) as exc_info:
+        persist_normalized_document(db, sample)
+
+    assert f"Chunk '{c1.chunk_id}' is already owned by Document 'doc_foreign_owner'" in str(exc_info.value)
+    assert f"cannot be reassigned or overwritten by Document '{doc.document_id}'" in str(exc_info.value)
+
+
+# ============================================================================
+# 7. Changed-Source PDF Versioning & Atomic Supersession Tests
+# ============================================================================
+
+
+def test_supersedes_previous_processed_version_atomically():
+    """Verify committing a new content version for an existing GCS URI atomically marks previous processed versions SUPERSEDED."""
+    sample = make_sample_doc()
+    old_doc_id = "doc_previous_version_hash12345"
+
+    txn = MockTransaction(
+        query_responses={
+            # New document not in DB yet
+            "WHERE DocumentId = @doc_id": [],
+            # Prior processed version exists with same GcsUri
+            "WHERE GcsUri = @gcs_uri": [
+                [old_doc_id],
+            ],
+            # Chunks are new
+            "FROM EvidenceChunks": [],
+            # Edges are new
+            "FROM DocumentContainsChunk": [],
+        }
+    )
+    db = MockDatabase(txn)
+
+    result = persist_normalized_document(db, sample)
+
+    assert result.document_action == "INSERTED"
+    assert result.superseded_documents == [old_doc_id]
+    assert result.chunks_inserted == 2
+    assert result.edges_inserted == 2
+    # 1 new doc insert + 1 old doc supersede update + 2 chunk inserts + 2 edge inserts = 6
+    assert result.total_mutations == 6
+
+    # Verify atomic update to SUPERSEDED
+    doc_upds = [u for u in txn.updates if u["table"] == "Documents"]
+    assert len(doc_upds) == 1
+    assert doc_upds[0]["columns"] == ["DocumentId", "Status"]
+    assert doc_upds[0]["values"] == [[old_doc_id, "SUPERSEDED"]]
+
+    # Verify new document is inserted with PROCESSED status
+    doc_ins = next(i for i in txn.inserts if i["table"] == "Documents")
+    status_idx = doc_ins["columns"].index("Status")
+    assert doc_ins["values"][0][status_idx] == "PROCESSED"
+
+
+def test_supersession_skips_different_gcs_uri_or_no_prior_versions():
+    """Verify supersession does not trigger if no prior processed version exists for the GCS URI."""
+    sample = make_sample_doc()
+
+    txn = MockTransaction(
+        query_responses={
+            "WHERE DocumentId = @doc_id": [],
+            "WHERE GcsUri = @gcs_uri": [],  # No prior versions
+            "FROM EvidenceChunks": [],
+            "FROM DocumentContainsChunk": [],
+        }
+    )
+    db = MockDatabase(txn)
+
+    result = persist_normalized_document(db, sample)
+
+    assert result.document_action == "INSERTED"
+    assert result.superseded_documents == []
+    assert result.total_mutations == 5  # 1 doc + 2 chunks + 2 edges
+    assert len(txn.updates) == 0
+
+
+def test_historical_records_preserved_on_supersession():
+    """Verify historical documents, chunks, and edges are never deleted during supersession."""
+    sample = make_sample_doc()
+    old_doc_id = "doc_v1_historical"
+
+    txn = MockTransaction(
+        query_responses={
+            "WHERE DocumentId = @doc_id": [],
+            "WHERE GcsUri = @gcs_uri": [[old_doc_id]],
+            "FROM EvidenceChunks": [],
+            "FROM DocumentContainsChunk": [],
+        }
+    )
+    db = MockDatabase(txn)
+
+    result = persist_normalized_document(db, sample)
+
+    assert result.superseded_documents == [old_doc_id]
+    # Verify no delete operations were called or tracked
+    for ins in txn.inserts:
+        assert ins["table"] in ("Documents", "EvidenceChunks", "DocumentContainsChunk")
+    for upd in txn.updates:
+        assert upd["table"] == "Documents"
+        assert upd["values"] == [[old_doc_id, "SUPERSEDED"]]
+
+
+def test_embedding_preservation_on_chunk_update():
+    """Verify that updating chunk content does not clobber existing Embedding768."""
+    sample = make_sample_doc()
+    doc = sample.document_node
+    c1, c2 = sample.chunks
+
+    # DB state: doc exists unchanged, c1 exists with changed text, c2 exists unchanged
+    txn = MockTransaction(
+        query_responses={
+            "FROM Documents": [
+                [
+                    doc.document_id,
+                    doc.file_name,
+                    doc.mime_type,
+                    doc.source_url,
+                    doc.gcs_uri,
+                    doc.status,
+                    None,
+                    None,
+                ]
+            ],
+            "FROM EvidenceChunks": [
+                [c1.chunk_id, c1.document_id, "Old text before revision", c1.modality, c1.page_number],
+                [c2.chunk_id, c2.document_id, c2.text_content, c2.modality, c2.page_number],
+            ],
+            "FROM DocumentContainsChunk": [
+                [c1.chunk_id],
+                [c2.chunk_id],
+            ],
+        }
+    )
+    db = MockDatabase(txn)
+
+    result = persist_normalized_document(db, sample)
+
+    assert result.document_action == "UNCHANGED"
+    assert result.chunks_updated == 1
+    assert result.chunks_unchanged == 1
+    assert result.total_mutations == 1
+
+    chk_upd = next(u for u in txn.updates if u["table"] == "EvidenceChunks")
+    assert "Embedding768" not in chk_upd["columns"]
+    assert chk_upd["columns"] == ["ChunkId", "TextContent", "Modality", "PageNumber"]
+    assert chk_upd["values"][0][0] == c1.chunk_id
+    assert chk_upd["values"][0][1] == c1.text_content

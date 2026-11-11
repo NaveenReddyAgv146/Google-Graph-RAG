@@ -188,10 +188,35 @@ def test_deterministic_chunk_id():
     cid_table = generate_chunk_id(doc_id, page_number=1, chunk_index=2, modality="TABLE")
 
     assert cid1 == cid2
-    assert cid1.endswith("_p01_t001")
-    assert cid_table.endswith("_p01_b002")
+    # Verify full content-addressed doc_id is preserved without arbitrary truncation
+    assert cid1 == "doc_e3b0c44298fc1c149afbf4c8996fb924_p01_t001"
+    assert cid_table == "doc_e3b0c44298fc1c149afbf4c8996fb924_p01_b002"
+    assert len(cid1) == 45
     assert len(cid1) <= 64
     assert len(cid_table) <= 64
+
+
+def test_chunk_id_global_uniqueness_across_documents():
+    # Two documents sharing the first 24 characters but differing afterwards
+    doc_a = "doc_12345678901234567890abcdAAAA"
+    doc_b = "doc_12345678901234567890abcdBBBB"
+
+    cid_a = generate_chunk_id(doc_a, page_number=1, chunk_index=1, modality="TEXT")
+    cid_b = generate_chunk_id(doc_b, page_number=1, chunk_index=1, modality="TEXT")
+
+    assert cid_a != cid_b
+    assert "AAAA" in cid_a
+    assert "BBBB" in cid_b
+    assert len(cid_a) <= 64
+    assert len(cid_b) <= 64
+
+
+def test_chunk_id_length_boundary_with_large_page_and_index():
+    # Very long document ID and large numbers
+    long_doc_id = "doc_" + "f" * 100
+    cid = generate_chunk_id(long_doc_id, page_number=999, chunk_index=9999, modality="TABLE")
+    assert len(cid) <= 64
+    assert cid.endswith("_p999_b9999")
 
 
 # ============================================================================

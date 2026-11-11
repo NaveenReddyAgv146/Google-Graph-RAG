@@ -1,6 +1,7 @@
 """Spanner database client, connection pool, and ingestion persistence utilities."""
 
 from common.database.ingestion_writer import (
+    ChunkOwnershipConflictError,
     IngestionPersistenceError,
     IngestionWriteResult,
     SchemaValidationError,
@@ -16,6 +17,7 @@ from common.database.spanner import (
 )
 
 __all__ = [
+    "ChunkOwnershipConflictError",
     "IngestionPersistenceError",
     "IngestionWriteResult",
     "SchemaValidationError",

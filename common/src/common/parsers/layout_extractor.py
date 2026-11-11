@@ -187,12 +187,16 @@ def generate_chunk_id(
 ) -> str:
     """
     Generates a deterministic ChunkId guaranteed <= 64 characters.
-    Example: 'doc_1234567890abcdef_p01_t001'
+    Retains the full content-addressed document ID prefix without unnecessary truncation.
+    Example: 'doc_e3b0c44298fc1c149afbf4c8996fb924_p01_t001'
     """
-    doc_prefix = document_id[:24] if document_id.startswith("doc_") else f"doc_{document_id[:20]}"
     mod_tag = "b" if modality.upper() == "TABLE" else "t"
-    chunk_id = f"{doc_prefix}_p{page_number:02d}_{mod_tag}{chunk_index:03d}"
-    return chunk_id[:64]
+    suffix = f"_p{page_number:02d}_{mod_tag}{chunk_index:03d}"
+    max_prefix_len = 64 - len(suffix)
+
+    clean_doc = document_id if document_id.startswith("doc_") else f"doc_{document_id}"
+    doc_prefix = clean_doc[:max_prefix_len]
+    return f"{doc_prefix}{suffix}"
 
 
 def split_oversized_text(text: str, max_chars: int, overlap_chars: int) -> list[str]:
