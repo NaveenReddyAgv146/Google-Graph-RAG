@@ -163,16 +163,10 @@ def run_manual_ingestion(
         settings = Settings()
         storage_client = get_storage_client(project=settings.project_id)
         docai_client = DocumentAiLayoutClient(
-            project_id=settings.project_id,
-            location=settings.documentai_location,
-            processor_id=settings.documentai_processor_id,
+            processor_name=settings.documentai_processor_name,
             endpoint=settings.documentai_endpoint,
         )
-        spanner_db = get_database(
-            instance_id=settings.spanner_instance_id,
-            database_id=settings.spanner_database_id,
-            project_id=settings.project_id,
-        )
+        spanner_db = get_database()
 
         if dry_run:
             logger.info("Dry-run requested: wrapping Spanner database in DryRunSpannerDatabase.")
@@ -225,3 +219,4 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+

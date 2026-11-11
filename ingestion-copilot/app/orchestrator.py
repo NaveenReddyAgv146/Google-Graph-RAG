@@ -120,9 +120,7 @@ class PdfIngestionOrchestrator:
     def docai_client(self) -> DocumentAiLayoutClient:
         if self._docai_client is None:
             self._docai_client = DocumentAiLayoutClient(
-                project_id=self.settings.project_id,
-                location=self.settings.documentai_location,
-                processor_id=self.settings.documentai_processor_id,
+                processor_name=self.settings.documentai_processor_name,
                 endpoint=self.settings.documentai_endpoint,
             )
         return self._docai_client
@@ -132,11 +130,7 @@ class PdfIngestionOrchestrator:
         if self._spanner_database is None:
             from common.database.spanner import get_database
 
-            self._spanner_database = get_database(
-                instance_id=self.settings.spanner_instance_id,
-                database_id=self.settings.spanner_database_id,
-                project_id=self.settings.project_id,
-            )
+            self._spanner_database = get_database()
         return self._spanner_database
 
     @property

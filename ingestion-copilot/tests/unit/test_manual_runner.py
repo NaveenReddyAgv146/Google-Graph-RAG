@@ -229,3 +229,73 @@ def test_cli_main_dispatch():
             "gs://sales-discovery-mvp-mumbai/whitepapers/test.pdf",
             dry_run=True,
         )
+
+
+def test_manual_runner_default_client_initialization(capsys):
+    """Verifies that running without an explicit orchestrator instantiates clients with exact matching arguments."""
+    with patch("scripts.ingest_pdf_manual.get_storage_client") as mock_get_storage, \
+         patch("scripts.ingest_pdf_manual.DocumentAiLayoutClient") as mock_docai_cls, \
+         patch("scripts.ingest_pdf_manual.get_database") as mock_get_db, \
+         patch("scripts.ingest_pdf_manual.PdfIngestionOrchestrator") as mock_orch_cls:
+
+        mock_orch = MagicMock()
+        mock_orch.ingest_pdf.return_value = DocumentIngestionResult(
+            gcs_uri="gs://sales-discovery-mvp-mumbai/whitepapers/test.pdf",
+            status=IngestionStatus.SUCCESS,
+            stage=IngestionStage.COMPLETED,
+            document_id="doc_test123",
+            chunks_count=1,
+            write_result=make_mock_write_result("doc_test123"),
+            duration_ms=100.0,
+        )
+        mock_orch_cls.return_value = mock_orch
+
+        res, exit_code = manual_runner.run_manual_ingestion(
+            "gs://sales-discovery-mvp-mumbai/whitepapers/test.pdf",
+            dry_run=False,
+            orchestrator=None,
+        )
+
+        assert exit_code == 0
+        assert res.status == IngestionStatus.SUCCESS
+
+        # Verify DocumentAiLayoutClient was called with processor_name and endpoint (NOT project_id)
+        mock_docai_cls.assert_called_once()
+        _, kwargs = mock_docai_cls.call_args
+        assert "processor_name" in kwargs
+        assert "endpoint" in kwargs
+        assert "project_id" not in kwargs
+
+        # Verify get_database was called with 0 arguments
+        mock_get_db.assert_called_once_with()
+
+
+def test_manual_runner_default_client_initialization_dry_run():
+    """Verifies that dry-run wraps Spanner in DryRunSpannerDatabase."""
+    with patch("scripts.ingest_pdf_manual.get_storage_client"), \
+         patch("scripts.ingest_pdf_manual.DocumentAiLayoutClient"), \
+         patch("scripts.ingest_pdf_manual.get_database") as mock_get_db, \
+         patch("scripts.ingest_pdf_manual.PdfIngestionOrchestrator") as mock_orch_cls:
+
+        mock_orch = MagicMock()
+        mock_orch.ingest_pdf.return_value = DocumentIngestionResult(
+            gcs_uri="gs://sales-discovery-mvp-mumbai/whitepapers/test.pdf",
+            status=IngestionStatus.SUCCESS,
+            stage=IngestionStage.COMPLETED,
+            document_id="doc_test123",
+            chunks_count=1,
+            write_result=make_mock_write_result("doc_test123"),
+            duration_ms=100.0,
+        )
+        mock_orch_cls.return_value = mock_orch
+
+        res, exit_code = manual_runner.run_manual_ingestion(
+            "gs://sales-discovery-mvp-mumbai/whitepapers/test.pdf",
+            dry_run=True,
+            orchestrator=None,
+        )
+
+        assert exit_code == 0
+        # Verify orchestrator received DryRunSpannerDatabase
+        _, kwargs = mock_orch_cls.call_args
+        assert isinstance(kwargs["spanner_database"], manual_runner.DryRunSpannerDatabase)
