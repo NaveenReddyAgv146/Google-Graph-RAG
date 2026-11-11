@@ -355,3 +355,4 @@ def test_repeated_headers_footers_stripping():
     assert len(norm_kept.chunks) == 1
     assert "REPEATED HEADER" in norm_kept.chunks[0].text_content
     assert "REPEATED FOOTER" in norm_kept.chunks[0].text_content
+
