@@ -263,3 +263,4 @@ def test_non_retryable_api_error():
 
     # Non-retryable error should fail on first attempt
     assert mock_raw_client.process_document.call_count == 1
+
