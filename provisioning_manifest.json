@@ -15,6 +15,78 @@
     {
       "type": "service_account",
       "id": "pubsub-invoker-sa@xenon-broker-513704-s9.iam.gserviceaccount.com"
+    },
+    {
+      "type": "iam_binding",
+      "resource": "spanner:sales-knowledge-db",
+      "role": "projects/xenon-broker-513704-s9/roles/spannerGraphDataReadWriter",
+      "member": "serviceAccount:ingestion-copilot-sa@xenon-broker-513704-s9.iam.gserviceaccount.com"
+    },
+    {
+      "type": "iam_binding",
+      "resource": "spanner:sales-knowledge-db",
+      "role": "roles/spanner.databaseReader",
+      "member": "serviceAccount:discovery-copilot-sa@xenon-broker-513704-s9.iam.gserviceaccount.com"
+    },
+    {
+      "type": "iam_binding",
+      "resource": "project:xenon-broker-513704-s9",
+      "role": "roles/documentai.apiUser",
+      "member": "serviceAccount:ingestion-copilot-sa@xenon-broker-513704-s9.iam.gserviceaccount.com"
+    },
+    {
+      "type": "iam_binding",
+      "resource": "project:xenon-broker-513704-s9",
+      "role": "roles/aiplatform.user",
+      "member": "serviceAccount:ingestion-copilot-sa@xenon-broker-513704-s9.iam.gserviceaccount.com"
+    },
+    {
+      "type": "iam_binding",
+      "resource": "project:xenon-broker-513704-s9",
+      "role": "roles/logging.logWriter",
+      "member": "serviceAccount:ingestion-copilot-sa@xenon-broker-513704-s9.iam.gserviceaccount.com"
+    },
+    {
+      "type": "iam_binding",
+      "resource": "project:xenon-broker-513704-s9",
+      "role": "roles/cloudtrace.agent",
+      "member": "serviceAccount:ingestion-copilot-sa@xenon-broker-513704-s9.iam.gserviceaccount.com"
+    },
+    {
+      "type": "iam_binding",
+      "resource": "project:xenon-broker-513704-s9",
+      "role": "roles/aiplatform.user",
+      "member": "serviceAccount:discovery-copilot-sa@xenon-broker-513704-s9.iam.gserviceaccount.com"
+    },
+    {
+      "type": "iam_binding",
+      "resource": "project:xenon-broker-513704-s9",
+      "role": "roles/logging.logWriter",
+      "member": "serviceAccount:discovery-copilot-sa@xenon-broker-513704-s9.iam.gserviceaccount.com"
+    },
+    {
+      "type": "iam_binding",
+      "resource": "project:xenon-broker-513704-s9",
+      "role": "roles/cloudtrace.agent",
+      "member": "serviceAccount:discovery-copilot-sa@xenon-broker-513704-s9.iam.gserviceaccount.com"
+    },
+    {
+      "type": "iam_binding",
+      "resource": "bucket:sales-discovery-mvp",
+      "role": "roles/storage.objectViewer",
+      "member": "serviceAccount:ingestion-copilot-sa@xenon-broker-513704-s9.iam.gserviceaccount.com"
+    },
+    {
+      "type": "iam_binding",
+      "resource": "bucket:sales-discovery-mvp",
+      "role": "roles/storage.objectViewer",
+      "member": "serviceAccount:discovery-copilot-sa@xenon-broker-513704-s9.iam.gserviceaccount.com"
+    },
+    {
+      "type": "iam_binding",
+      "resource": "serviceAccount:pubsub-invoker-sa@xenon-broker-513704-s9.iam.gserviceaccount.com",
+      "role": "roles/iam.serviceAccountTokenCreator",
+      "member": "serviceAccount:service-291679685305@gcp-sa-pubsub.iam.gserviceaccount.com"
     }
   ]
 }
