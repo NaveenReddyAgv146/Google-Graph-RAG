@@ -87,6 +87,22 @@
       "resource": "serviceAccount:pubsub-invoker-sa@xenon-broker-513704-s9.iam.gserviceaccount.com",
       "role": "roles/iam.serviceAccountTokenCreator",
       "member": "serviceAccount:service-291679685305@gcp-sa-pubsub.iam.gserviceaccount.com"
+    },
+    {
+      "type": "gcs_bucket",
+      "id": "gs://sales-discovery-mvp-mumbai"
+    },
+    {
+      "type": "iam_binding",
+      "resource": "bucket:sales-discovery-mvp-mumbai",
+      "role": "roles/storage.objectAdmin",
+      "member": "serviceAccount:ingestion-copilot-sa@xenon-broker-513704-s9.iam.gserviceaccount.com"
+    },
+    {
+      "type": "iam_binding",
+      "resource": "bucket:sales-discovery-mvp-mumbai",
+      "role": "roles/storage.objectViewer",
+      "member": "serviceAccount:discovery-copilot-sa@xenon-broker-513704-s9.iam.gserviceaccount.com"
     }
   ]
 }
