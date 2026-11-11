@@ -38,5 +38,19 @@ class Settings:
         "projects/xenon-broker-513704-s9/subscriptions/ingestion-worker-sub",
     )
 
+    # Document AI Layout Parser (us region)
+    documentai_location: str = os.getenv("DOCUMENTAI_LOCATION", "us")
+    documentai_processor_id: str = os.getenv(
+        "DOCUMENTAI_PROCESSOR_ID", "d79bb791cfba8a30"
+    )
+    documentai_endpoint: str = os.getenv(
+        "DOCUMENTAI_ENDPOINT", "us-documentai.googleapis.com"
+    )
+
+    @property
+    def documentai_processor_name(self) -> str:
+        """Fully qualified Document AI processor resource path."""
+        return f"projects/{self.project_id}/locations/{self.documentai_location}/processors/{self.documentai_processor_id}"
+
 
 settings = Settings()
