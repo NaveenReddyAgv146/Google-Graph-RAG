@@ -6,7 +6,6 @@ from common.rbac.rbac import (
 )
 
 __all__ = [
-    "resolve_principal_access",
     "build_document_access_filter",
+    "resolve_principal_access",
 ]
-

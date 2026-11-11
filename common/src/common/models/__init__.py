@@ -12,13 +12,12 @@ from common.models.schema import (
 )
 
 __all__ = [
-    "DocumentNode",
     "ChunkNode",
-    "SolutionCardNode",
-    "VisualAssetNode",
-    "RepositoryNode",
-    "SourceFileNode",
+    "DocumentNode",
     "EntityNode",
+    "RepositoryNode",
+    "SolutionCardNode",
+    "SourceFileNode",
     "TechnologyNode",
+    "VisualAssetNode",
 ]
-

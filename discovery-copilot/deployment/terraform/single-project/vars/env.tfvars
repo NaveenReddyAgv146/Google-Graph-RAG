@@ -2,7 +2,7 @@
 project_name = "discovery-copilot"
 
 # Your Google Cloud project id
-project_id = "your-gcp-project-id"
+project_id = "xenon-broker-513704-s9"
 
 # The Google Cloud region you will use to deploy the infrastructure
 region = "asia-south1"

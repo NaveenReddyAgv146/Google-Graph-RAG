@@ -3,4 +3,3 @@
 from common.search.mmr import compute_mmr
 
 __all__ = ["compute_mmr"]
-
