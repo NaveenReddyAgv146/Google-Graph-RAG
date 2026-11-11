@@ -121,6 +121,19 @@
       "id": "projects/xenon-broker-513704-s9/topics/ingestion-events",
       "topic_id": "ingestion-events",
       "region": "asia-south1"
+    },
+    {
+      "type": "secret",
+      "id": "projects/xenon-broker-513704-s9/secrets/github-access-token",
+      "secret_id": "github-access-token",
+      "replication": "user-managed",
+      "location": "asia-south1"
+    },
+    {
+      "type": "iam_binding",
+      "resource": "secret:github-access-token",
+      "role": "roles/secretmanager.secretAccessor",
+      "member": "serviceAccount:ingestion-copilot-sa@xenon-broker-513704-s9.iam.gserviceaccount.com"
     }
   ]
 }
