@@ -107,6 +107,14 @@
     {
       "type": "artifact_registry",
       "id": "projects/xenon-broker-513704-s9/locations/asia-south1/repositories/enterprise-graphrag"
+    },
+    {
+      "type": "documentai_processor",
+      "id": "projects/291679685305/locations/us/processors/d79bb791cfba8a30",
+      "processor_id": "d79bb791cfba8a30",
+      "location": "us",
+      "processor_type": "LAYOUT_PARSER_PROCESSOR",
+      "display_name": "enterprise-graphrag-layout-parser"
     }
   ]
 }
