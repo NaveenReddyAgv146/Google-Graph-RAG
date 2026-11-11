@@ -115,6 +115,12 @@
       "location": "us",
       "processor_type": "LAYOUT_PARSER_PROCESSOR",
       "display_name": "enterprise-graphrag-layout-parser"
+    },
+    {
+      "type": "pubsub_topic",
+      "id": "projects/xenon-broker-513704-s9/topics/ingestion-events",
+      "topic_id": "ingestion-events",
+      "region": "asia-south1"
     }
   ]
 }
