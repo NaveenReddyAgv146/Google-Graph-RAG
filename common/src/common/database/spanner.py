@@ -50,7 +50,7 @@ def execute_gql_query(
 
 
 def execute_read_write_transaction(
-    database, callable_fn: Callable[[spanner.Transaction], Any]
+    database, callable_fn: Callable[[Any], Any]
 ) -> Any:
     """
     Executes a unit of work inside a Cloud Spanner serializable read-write transaction.
