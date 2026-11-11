@@ -103,6 +103,10 @@
       "resource": "bucket:sales-discovery-mvp-mumbai",
       "role": "roles/storage.objectViewer",
       "member": "serviceAccount:discovery-copilot-sa@xenon-broker-513704-s9.iam.gserviceaccount.com"
+    },
+    {
+      "type": "artifact_registry",
+      "id": "projects/xenon-broker-513704-s9/locations/asia-south1/repositories/enterprise-graphrag"
     }
   ]
 }
