@@ -251,3 +251,4 @@ def download_pdf_from_uri(
     """Downloads PDF using full 'gs://bucket/object' URI."""
     bucket_name, blob_name = parse_gcs_uri(gcs_uri)
     return download_pdf(bucket_name, blob_name, client=client)
+
