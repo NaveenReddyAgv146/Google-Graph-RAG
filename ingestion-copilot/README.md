@@ -83,6 +83,20 @@ agents-cli deploy
 To add CI/CD and Terraform, run `agents-cli scaffold enhance`.
 To set up your production infrastructure, run `agents-cli infra cicd`.
 
+## Manual PDF Ingestion Test Runner (Phase 3A)
+
+To manually ingest a single PDF from Cloud Storage through the Document AI layout parser, chunk normalizer, and transactional Spanner persistence writer:
+
+```bash
+# Ingest single PDF with live Spanner persistence
+uv run python scripts/ingest_pdf_manual.py gs://sales-discovery-mvp-mumbai/whitepapers/sample.pdf
+
+# Dry run (executes download, Document AI layout parsing, chunk normalization; skips Spanner writes)
+uv run python scripts/ingest_pdf_manual.py gs://sales-discovery-mvp-mumbai/whitepapers/sample.pdf --dry-run
+```
+
+---
+
 ## Observability
 
 Built-in telemetry exports to Cloud Trace, BigQuery, and Cloud Logging.

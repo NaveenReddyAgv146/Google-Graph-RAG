@@ -61,3 +61,17 @@ cd ../discovery-copilot
 uv run pytest tests/unit
 ```
 
+---
+
+## Manual PDF Ingestion Test Runner (Phase 3A)
+
+To manually ingest a single PDF from Cloud Storage through the Document AI layout parser, chunk normalizer, and transactional Spanner writer:
+
+```bash
+# Ingest single PDF with live Spanner persistence
+uv run python scripts/ingest_pdf_manual.py gs://sales-discovery-mvp-mumbai/whitepapers/sample.pdf
+
+# Dry run (executes download, Document AI layout parsing, chunk normalization; skips Spanner writes)
+uv run python scripts/ingest_pdf_manual.py gs://sales-discovery-mvp-mumbai/whitepapers/sample.pdf --dry-run
+```
+
