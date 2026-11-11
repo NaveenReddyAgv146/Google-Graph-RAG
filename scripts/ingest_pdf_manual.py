@@ -22,10 +22,14 @@ _repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 _common_src = os.path.join(_repo_root, "common", "src")
 _ingestion_src = os.path.join(_repo_root, "ingestion-copilot")
 
-if _common_src not in sys.path:
-    sys.path.insert(0, _common_src)
-if _ingestion_src not in sys.path:
-    sys.path.insert(0, _ingestion_src)
+# Ensure ingestion-copilot precedes sibling packages (e.g. discovery-copilot) in sys.path
+while _ingestion_src in sys.path:
+    sys.path.remove(_ingestion_src)
+sys.path.insert(0, _ingestion_src)
+
+while _common_src in sys.path:
+    sys.path.remove(_common_src)
+sys.path.insert(0, _common_src)
 
 from app.orchestrator import (
     DocumentIngestionResult,
