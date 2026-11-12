@@ -16,14 +16,39 @@ from common.storage.pdf_reader import (
     validate_bucket_approved,
 )
 from common.storage.resolver import resolve_gcs_asset_uri
+from common.storage.asset_uploader import (
+    AssetAccessDeniedError,
+    AssetCleanupError,
+    AssetStorageError,
+    AssetUploadError,
+    InvalidImagePayloadError,
+    InvalidImageSignatureError,
+    UploadedVisualAsset,
+    VisualAssetUploader,
+    build_embedded_image_path,
+    build_slide_render_path,
+    detect_image_mime_type,
+    validate_image_content,
+)
 
 __all__ = [
+    "AssetAccessDeniedError",
+    "AssetCleanupError",
+    "AssetStorageError",
+    "AssetUploadError",
     "DownloadedPdf",
     "GcsAccessError",
     "GcsStorageError",
+    "InvalidImagePayloadError",
+    "InvalidImageSignatureError",
     "PdfMetadata",
     "UnapprovedBucketError",
+    "UploadedVisualAsset",
+    "VisualAssetUploader",
+    "build_embedded_image_path",
+    "build_slide_render_path",
     "compute_sha256",
+    "detect_image_mime_type",
     "download_pdf",
     "download_pdf_from_uri",
     "get_approved_buckets",
@@ -32,4 +57,5 @@ __all__ = [
     "parse_gcs_uri",
     "resolve_gcs_asset_uri",
     "validate_bucket_approved",
+    "validate_image_content",
 ]
