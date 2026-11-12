@@ -31,6 +31,17 @@ from common.parsers.layout_extractor import (
     split_oversized_text,
 )
 
+from common.parsers.slides_client import (
+    GoogleSlidesClient,
+    InvalidPresentationIdError,
+    PresentationAccessDeniedError,
+    PresentationNotFoundError,
+    SlidesApiError,
+    SlidesClientError,
+    SlidesRateLimitExceededError,
+    ThumbnailDownloadError,
+)
+
 __all__ = [
     "DEFAULT_SYNC_PAGE_LIMIT",
     "MAX_INLINE_PAYLOAD_BYTES",
@@ -39,12 +50,20 @@ __all__ = [
     "DocumentAiError",
     "DocumentAiLayoutClient",
     "EmptyDocumentExtractionError",
+    "GoogleSlidesClient",
     "InvalidDocumentError",
+    "InvalidPresentationIdError",
     "LayoutElement",
     "NormalizedDocument",
     "OversizedPayloadError",
     "PageLimitExceededError",
     "ParsedDocument",
+    "PresentationAccessDeniedError",
+    "PresentationNotFoundError",
+    "SlidesApiError",
+    "SlidesClientError",
+    "SlidesRateLimitExceededError",
+    "ThumbnailDownloadError",
     "convert_layout_table_to_markdown",
     "convert_table_to_markdown",
     "estimate_pdf_page_count",
