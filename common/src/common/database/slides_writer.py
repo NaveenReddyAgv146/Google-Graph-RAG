@@ -204,10 +204,29 @@ def persist_normalized_presentation(
             "empty extraction indicates failure."
         )
     validate_document_fields(doc_node)
+
+    # Validate uniqueness of IDs within presentation
+    chunk_ids = [chk.chunk_id for chk in chunks]
+    if len(chunk_ids) != len(set(chunk_ids)):
+        raise SchemaValidationError("Duplicate ChunkId detected within NormalizedPresentation.")
+    visual_ids = [vis.visual_id for vis in visual_assets]
+    if len(visual_ids) != len(set(visual_ids)):
+        raise SchemaValidationError("Duplicate VisualId detected within NormalizedPresentation.")
+
     for chk in chunks:
         validate_chunk_fields(chk)
+        if chk.document_id != doc_node.document_id:
+            raise SchemaValidationError(
+                f"Chunk '{chk.chunk_id}' document_id '{chk.document_id}' does not match "
+                f"presentation document_id '{doc_node.document_id}'."
+            )
     for vis in visual_assets:
         validate_visual_asset_fields(vis)
+        if getattr(vis, "document_id", None) != doc_node.document_id:
+            raise SchemaValidationError(
+                f"VisualAsset '{getattr(vis, 'visual_id', None)}' document_id does not match "
+                f"presentation document_id '{doc_node.document_id}'."
+            )
 
     def _txn_callback(transaction: Any) -> SlidesWriteResult:
         doc_id = doc_node.document_id
@@ -346,7 +365,7 @@ def persist_normalized_presentation(
             doc_action = "INSERTED"
         else:
             ex_row = existing_doc_rows[0]
-            ex_file_name, _, ex_src_url, ex_gcs, ex_status, ex_drive = (
+            ex_file_name, ex_mime, ex_src_url, ex_gcs, ex_status, ex_drive = (
                 ex_row[1],
                 ex_row[2],
                 ex_row[3],
@@ -362,6 +381,10 @@ def persist_normalized_presentation(
             if doc_node.file_name and doc_node.file_name != ex_file_name:
                 upd_columns.append("FileName")
                 upd_values.append(doc_node.file_name)
+                needs_update = True
+            if doc_node.mime_type and doc_node.mime_type != ex_mime:
+                upd_columns.append("MimeType")
+                upd_values.append(doc_node.mime_type)
                 needs_update = True
             if doc_node.source_url and doc_node.source_url != ex_src_url:
                 upd_columns.append("SourceUrl")

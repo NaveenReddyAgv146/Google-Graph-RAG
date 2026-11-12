@@ -506,3 +506,235 @@ def test_persist_retry_on_aborted_conflict():
 
     assert result.document_action == "INSERTED"
     assert db.attempts == 3  # 2 failed + 1 successful
+
+
+# ============================================================================
+# 7. AUDIT VERIFICATION TESTS
+# ============================================================================
+
+
+def test_audit_transaction_failure_aborts_all_mutations():
+    """Invariant 1: If any mutation or transaction operation fails, no partial Spanner writes are committed."""
+    norm = make_sample_presentation()
+
+    txn = MockTransaction(
+        query_responses={
+            "FROM Documents": [],
+            "FROM EvidenceChunks": [],
+            "FROM VisualAssets": [],
+            "FROM DocumentContainsChunk": [],
+            "FROM VisualAssetBelongsToDoc": [],
+        }
+    )
+
+    # Simulate an unexpected failure midway through mutation buffering
+    original_insert = txn.insert
+
+    def faulty_insert(table: str, columns: list[str], values: list[list[Any]]):
+        if table == "VisualAssets":
+            raise RuntimeError("Simulated transient Spanner mutation failure")
+        original_insert(table, columns, values)
+
+    txn.insert = faulty_insert
+    db = MockDatabase(txn)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        persist_normalized_presentation(db, norm)
+    assert "Simulated transient Spanner mutation failure" in str(exc_info.value)
+
+    # Verify MockDatabase discarded any buffered mutations on failure
+    assert len(txn.inserts) == 0
+    assert len(txn.updates) == 0
+
+
+def test_audit_unrelated_records_and_embeddings_preserved():
+    """Invariant 2: Unrelated documents, chunks, visual assets, metadata, and embeddings remain untouched."""
+    norm = make_sample_presentation()
+    doc_id = norm.document_node.document_id
+
+    # Document exists with RepoId and pre-existing chunk with an existing Embedding768 vector
+    txn = MockTransaction(
+        query_responses={
+            "FROM Documents": [
+                [
+                    doc_id,
+                    "Old Title.gslides",
+                    norm.document_node.mime_type,
+                    norm.document_node.source_url,
+                    norm.document_node.gcs_uri,
+                    "ACTIVE",
+                    norm.document_node.drive_file_id,
+                    "important_repo_001",  # RepoId
+                ]
+            ],
+            "FROM EvidenceChunks": [
+                # Chunk 0 has changed text; chunk 1 unchanged
+                [norm.chunks[0].chunk_id, doc_id, "Old text content", "TEXT", 1],
+                [norm.chunks[1].chunk_id, doc_id, norm.chunks[1].text_content, "TABLE", 2],
+            ],
+            "FROM VisualAssets": [
+                [
+                    norm.visual_assets[0].visual_id,
+                    doc_id,
+                    norm.visual_assets[0].image_gcs_uri,
+                    norm.visual_assets[0].description,
+                    "SLIDE",
+                    1,
+                ],
+                [
+                    norm.visual_assets[1].visual_id,
+                    doc_id,
+                    norm.visual_assets[1].image_gcs_uri,
+                    norm.visual_assets[1].description,
+                    "IMAGE",
+                    2,
+                ],
+            ],
+            "FROM DocumentContainsChunk": [
+                [norm.chunks[0].chunk_id],
+                [norm.chunks[1].chunk_id],
+            ],
+            "FROM VisualAssetBelongsToDoc": [
+                [norm.visual_assets[0].visual_id],
+                [norm.visual_assets[1].visual_id],
+            ],
+        }
+    )
+    db = MockDatabase(txn)
+
+    result = persist_normalized_presentation(db, norm)
+    assert result.chunks_updated == 1
+
+    # Verify that EvidenceChunks update never touches Embedding768
+    chunk_updates = [u for u in txn.updates if u["table"] == "EvidenceChunks"]
+    assert len(chunk_updates) == 1
+    assert "Embedding768" not in chunk_updates[0]["columns"]
+
+    # Verify that Documents update never touches RepoId
+    doc_updates = [u for u in txn.updates if u["table"] == "Documents"]
+    assert len(doc_updates) == 1
+    assert "RepoId" not in doc_updates[0]["columns"]
+
+
+def test_audit_all_five_tables_participate_in_same_transaction():
+    """Invariant 3: All five tables participate in the same serializable transaction."""
+    norm = make_sample_presentation()
+
+    txn = MockTransaction(
+        query_responses={
+            "FROM Documents": [],
+            "FROM EvidenceChunks": [],
+            "FROM VisualAssets": [],
+            "FROM DocumentContainsChunk": [],
+            "FROM VisualAssetBelongsToDoc": [],
+        }
+    )
+    db = MockDatabase(txn)
+
+    result = persist_normalized_presentation(db, norm)
+    # 1 doc + 2 chunks + 2 visuals + 2 chunk edges + 2 visual edges = 9 total mutations
+    assert result.total_mutations == 9
+
+    # Confirm all 5 tables were queried on this exact txn
+    executed_sql = " ".join(txn.executed_queries)
+    assert "FROM Documents" in executed_sql
+    assert "FROM EvidenceChunks" in executed_sql
+    assert "FROM VisualAssets" in executed_sql
+    assert "FROM DocumentContainsChunk" in executed_sql
+    assert "FROM VisualAssetBelongsToDoc" in executed_sql
+
+    # Confirm all 5 tables received mutations on this exact txn
+    tables_inserted = {ins["table"] for ins in txn.inserts}
+    assert tables_inserted == {
+        "Documents",
+        "EvidenceChunks",
+        "VisualAssets",
+        "DocumentContainsChunk",
+        "VisualAssetBelongsToDoc",
+    }
+
+
+def test_audit_intra_presentation_duplicate_ids_rejected():
+    """Invariant 5 & Pre-transaction validation: Duplicate chunk/visual IDs and doc mismatches are rejected."""
+    norm = make_sample_presentation()
+
+    # Duplicate ChunkId
+    dup_chunk = ChunkNode(
+        chunk_id=norm.chunks[0].chunk_id,  # Same chunk ID!
+        document_id=norm.document_node.document_id,
+        file_id=None,
+        modality="TEXT",
+        text_content="Duplicate chunk text",
+        page_number=None,
+        slide_number=3,
+        commit_sha=None,
+        line_range=None,
+        source_gcs_uri=None,
+        embedding_768=None,
+    )
+    invalid_norm_chunks = NormalizedPresentation(
+        document_node=norm.document_node,
+        chunks=norm.chunks + [dup_chunk],
+        visual_assets=norm.visual_assets,
+        slide_count=norm.slide_count,
+        table_count=norm.table_count,
+        image_count=norm.image_count,
+        total_characters=norm.total_characters + len(dup_chunk.text_content),
+    )
+    db = MockDatabase()
+    with pytest.raises(SchemaValidationError) as exc_info:
+        persist_normalized_presentation(db, invalid_norm_chunks)
+    assert "Duplicate ChunkId detected" in str(exc_info.value)
+    assert db.attempts == 0  # Pre-transaction check: no transaction initiated
+
+    # Duplicate VisualId
+    dup_visual = VisualAssetNode(
+        visual_id=norm.visual_assets[0].visual_id,  # Same visual ID!
+        document_id=norm.document_node.document_id,
+        page_number=None,
+        slide_number=3,
+        image_gcs_uri="gs://bucket/dup.png",
+        description="Duplicate visual",
+        asset_type="SLIDE",
+    )
+    invalid_norm_visuals = NormalizedPresentation(
+        document_node=norm.document_node,
+        chunks=norm.chunks,
+        visual_assets=norm.visual_assets + [dup_visual],
+        slide_count=norm.slide_count,
+        table_count=norm.table_count,
+        image_count=norm.image_count + 1,
+        total_characters=norm.total_characters,
+    )
+    with pytest.raises(SchemaValidationError) as exc_info:
+        persist_normalized_presentation(db, invalid_norm_visuals)
+    assert "Duplicate VisualId detected" in str(exc_info.value)
+    assert db.attempts == 0
+
+    # Mismatched DocumentId in chunk
+    mismatched_chunk = ChunkNode(
+        chunk_id="chunk_mismatch_001",
+        document_id="doc_DIFFERENT_ID",
+        file_id=None,
+        modality="TEXT",
+        text_content="Mismatched doc id chunk",
+        page_number=None,
+        slide_number=1,
+        commit_sha=None,
+        line_range=None,
+        source_gcs_uri=None,
+        embedding_768=None,
+    )
+    invalid_mismatch_norm = NormalizedPresentation(
+        document_node=norm.document_node,
+        chunks=[mismatched_chunk],
+        visual_assets=[],
+        slide_count=1,
+        table_count=0,
+        image_count=0,
+        total_characters=len(mismatched_chunk.text_content),
+    )
+    with pytest.raises(SchemaValidationError) as exc_info:
+        persist_normalized_presentation(db, invalid_mismatch_norm)
+    assert "does not match presentation document_id" in str(exc_info.value)
+    assert db.attempts == 0
