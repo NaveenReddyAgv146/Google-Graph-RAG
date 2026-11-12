@@ -630,3 +630,7 @@ class VisualAssetUploader:
             self._execute_with_retry(f"delete {blob_name}", blob.delete)
             return True
         return False
+
+
+# Semantic alias
+GoogleSlidesAssetUploader = VisualAssetUploader

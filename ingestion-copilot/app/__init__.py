@@ -20,12 +20,28 @@ from .orchestrator import (
     PdfIngestionOrchestrator,
     PipelineExecutionSummary,
 )
+from .slides_orchestrator import (
+    DryRunSpannerDatabase,
+    DryRunSpannerTransaction,
+    GoogleSlidesOrchestrator,
+    SlidesIngestionResult,
+    SlidesIngestionStage,
+    SlidesIngestionStatus,
+    extract_presentation_id,
+)
 
 __all__ = [
     "DocumentIngestionResult",
+    "DryRunSpannerDatabase",
+    "DryRunSpannerTransaction",
+    "GoogleSlidesOrchestrator",
     "IngestionStage",
     "IngestionStatus",
     "PdfIngestionOrchestrator",
     "PipelineExecutionSummary",
+    "SlidesIngestionResult",
+    "SlidesIngestionStage",
+    "SlidesIngestionStatus",
     "app",
+    "extract_presentation_id",
 ]

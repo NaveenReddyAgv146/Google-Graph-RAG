@@ -68,6 +68,12 @@ class ThumbnailDownloadError(SlidesClientError):
     pass
 
 
+# Semantic aliases for exception naming consistency
+SlidesNotFoundError = PresentationNotFoundError
+SlidesAccessDeniedError = PresentationAccessDeniedError
+SlidesRateLimitError = SlidesRateLimitExceededError
+
+
 # ============================================================================
 # Client Implementation
 # ============================================================================
