@@ -15,12 +15,14 @@ from common.storage.asset_uploader import (
     AssetUploadError,
     InvalidImagePayloadError,
     InvalidImageSignatureError,
+    PreviousBlobState,
     UnapprovedBucketError,
     UploadedVisualAsset,
     VisualAssetUploader,
     build_embedded_image_path,
     build_slide_render_path,
     detect_image_mime_type,
+    is_temporary_content_url,
     validate_image_content,
 )
 
@@ -129,7 +131,7 @@ def test_upload_slide_render_success():
     )
 
     assert isinstance(result, UploadedVisualAsset)
-    assert result.action == "UPLOADED"
+    assert result.action == "CREATED"
     assert result.document_id == "doc_slide_123"
     assert result.slide_number == 1
     assert result.asset_type == "SLIDE"
@@ -172,7 +174,7 @@ def test_upload_embedded_image_success():
         object_id="elem_img_01",
     )
 
-    assert result.action == "UPLOADED"
+    assert result.action == "CREATED"
     assert result.asset_type == "IMAGE"
     assert result.content_type == "image/jpeg"
     assert result.object_name == "extracted-images/doc_slide_123/slides/slide-2-image-1.jpg"
@@ -207,7 +209,7 @@ def test_upload_idempotency_skip_existing():
 
 
 def test_upload_overwrite_when_hash_differs():
-    """Verifies that a blob is re-uploaded when content has changed."""
+    """Verifies that a blob is re-uploaded when content has changed and previous state is captured."""
     mock_storage = MagicMock()
     mock_bucket = MagicMock()
     mock_blob = MagicMock()
@@ -215,6 +217,8 @@ def test_upload_overwrite_when_hash_differs():
     mock_blob.exists.return_value = True
     mock_blob.metadata = {"sha256": "different_old_hash_123"}
     mock_blob.size = 999
+    mock_blob.download_as_bytes.return_value = b"OLD_BYTES"
+    mock_blob.content_type = "image/png"
     mock_bucket.blob.return_value = mock_blob
     mock_storage.bucket.return_value = mock_bucket
 
@@ -225,7 +229,10 @@ def test_upload_overwrite_when_hash_differs():
         image_bytes=VALID_PNG_BYTES,
     )
 
-    assert result.action == "UPLOADED"
+    assert result.action == "OVERWRITTEN"
+    assert result.previous_state is not None
+    assert result.previous_state.content == b"OLD_BYTES"
+    assert result.previous_state.metadata == {"sha256": "different_old_hash_123"}
     mock_blob.upload_from_string.assert_called_once()
 
 
@@ -255,7 +262,7 @@ def test_upload_retry_on_transient_error():
         image_bytes=VALID_PNG_BYTES,
     )
 
-    assert result.action == "UPLOADED"
+    assert result.action == "CREATED"
     assert mock_blob.upload_from_string.call_count == 2
 
 
@@ -332,42 +339,7 @@ def test_upload_presentation_assets_success():
     assert assets[0].slide_number == 1 and assets[0].asset_type == "SLIDE"
     assert assets[1].slide_number == 2 and assets[1].asset_type == "SLIDE"
     assert assets[2].slide_number == 1 and assets[2].asset_type == "IMAGE"
-
-
-def test_upload_presentation_assets_rollback_on_failure():
-    """Verifies that blobs uploaded before a failure are cleaned up during rollback."""
-    mock_storage = MagicMock()
-    mock_bucket = MagicMock()
-
-    blob1 = MagicMock()
-    blob1.exists.return_value = False
-    blob2 = MagicMock()
-    blob2.exists.return_value = False
-    # blob 2 upload fails
-    blob2.upload_from_string.side_effect = InternalServerError("Upload exploded")
-
-    def _blob_factory(name: str):
-        if "slide-1" in name:
-            return blob1
-        return blob2
-
-    mock_bucket.blob.side_effect = _blob_factory
-    mock_storage.bucket.return_value = mock_bucket
-
-    uploader = VisualAssetUploader(storage_client=mock_storage, max_retries=1, initial_delay=0.01)
-    slide_renders = {1: VALID_PNG_BYTES, 2: VALID_PNG_BYTES}
-
-    with pytest.raises(AssetUploadError):
-        uploader.upload_presentation_assets(
-            document_id="doc_pres_001",
-            slide_renders=slide_renders,
-            rollback_on_failure=True,
-        )
-
-    # blob1 was uploaded, so its delete method MUST be called during rollback!
-    blob1.delete.assert_called_once()
-    # blob2 never succeeded, so it was not in newly_uploaded
-    blob2.delete.assert_not_called()
+    assert all(a.action == "CREATED" for a in assets)
 
 
 def test_cleanup_uploaded_assets():
@@ -390,6 +362,7 @@ def test_cleanup_uploaded_assets():
         size_bytes=100,
         content_type="image/png",
         asset_type="SLIDE",
+        action="CREATED",
     )
 
     deleted = uploader.cleanup_uploaded_assets([asset])
@@ -416,3 +389,182 @@ def test_delete_asset_by_uri():
     # Wrong bucket raises error
     with pytest.raises(UnapprovedBucketError):
         uploader.delete_asset_by_uri(f"gs://{settings.gcs_legacy_bucket}/other.png")
+
+
+# ============================================================================
+# 6. AUDIT SPECIFIC REGRESSION TESTS
+# ============================================================================
+
+
+def test_audit_temporary_content_url_never_stored_in_metadata():
+    """Verify temporary Google Slides contentUrls are never saved to persistent metadata or DB references."""
+    mock_storage = MagicMock()
+    mock_bucket = MagicMock()
+    mock_blob = MagicMock()
+    mock_blob.exists.return_value = False
+    mock_bucket.blob.return_value = mock_blob
+    mock_storage.bucket.return_value = mock_bucket
+
+    uploader = VisualAssetUploader(storage_client=mock_storage)
+
+    # 1. Temporary URL passed directly: must be stripped from metadata
+    temp_url = "https://lh3.googleusercontent.com/docs/securesc/30min_temp_token_xyz"
+    assert is_temporary_content_url(temp_url) is True
+
+    res = uploader.upload_embedded_image(
+        document_id="doc_slide_sec",
+        slide_number=1,
+        image_index=1,
+        image_bytes=VALID_PNG_BYTES,
+        source_url=temp_url,
+    )
+    # Blob metadata must NOT contain the temporary URL
+    assert mock_blob.metadata["source_url"] == ""
+
+    # Database reference must be a permanent GCS URI, NEVER a contentUrl
+    node = res.to_visual_asset_node()
+    assert node.image_gcs_uri.startswith("gs://")
+    assert "googleusercontent.com" not in node.image_gcs_uri
+
+    # 2. Permanent source URL: must be preserved
+    perm_url = "https://example.com/assets/permanent-architecture-diagram.png"
+    assert is_temporary_content_url(perm_url) is False
+
+    uploader.upload_embedded_image(
+        document_id="doc_slide_sec",
+        slide_number=1,
+        image_index=2,
+        image_bytes=VALID_PNG_BYTES,
+        source_url=perm_url,
+    )
+    assert mock_blob.metadata["source_url"] == perm_url
+
+
+def test_audit_compensation_preserves_and_restores_overwritten_object_on_failure():
+    """Verify compensation restores an overwritten object back to original state if a later upload fails."""
+    mock_storage = MagicMock()
+    mock_bucket = MagicMock()
+
+    # Blob 1: exists in GCS with original content
+    blob1 = MagicMock()
+    blob1.exists.return_value = True
+    blob1.metadata = {"sha256": "orig_sha_123", "author": "original"}
+    blob1.size = 50
+    blob1.download_as_bytes.return_value = b"ORIGINAL_BYTES_DATA"
+    blob1.content_type = "image/png"
+
+    # Blob 2: upload will fail with 500 error
+    blob2 = MagicMock()
+    blob2.exists.return_value = False
+    blob2.upload_from_string.side_effect = InternalServerError("Upload exploded on slide 2")
+
+    def _blob_factory(name: str):
+        if "slide-1" in name:
+            return blob1
+        return blob2
+
+    mock_bucket.blob.side_effect = _blob_factory
+    mock_storage.bucket.return_value = mock_bucket
+
+    uploader = VisualAssetUploader(storage_client=mock_storage, max_retries=1, initial_delay=0.01)
+    slide_renders = {1: VALID_PNG_BYTES, 2: VALID_PNG_BYTES}
+
+    with pytest.raises(AssetUploadError):
+        uploader.upload_presentation_assets(
+            document_id="doc_pres_comp",
+            slide_renders=slide_renders,
+            rollback_on_failure=True,
+        )
+
+    # 1. blob1 was overwritten, so it MUST NOT be deleted!
+    blob1.delete.assert_not_called()
+
+    # 2. blob1 MUST be restored with original content and metadata!
+    # Expected call: upload_from_string(b"ORIGINAL_BYTES_DATA", content_type="image/png")
+    restore_calls = [
+        c for c in blob1.upload_from_string.call_args_list if c[0][0] == b"ORIGINAL_BYTES_DATA"
+    ]
+    assert len(restore_calls) == 1
+    assert blob1.metadata["sha256"] == "orig_sha_123"
+    assert blob1.metadata["author"] == "original"
+
+
+def test_audit_rollback_deletes_only_newly_created_objects():
+    """Verify rollback compensation deletes only newly created objects and leaves existing ones untouched."""
+    mock_storage = MagicMock()
+    mock_bucket = MagicMock()
+
+    # Blob 1: newly created by batch (did not exist)
+    blob1 = MagicMock()
+    blob1.exists.return_value = False
+
+    # Blob 2: already existed with identical content (skipped)
+    blob2 = MagicMock()
+    blob2.exists.return_value = True
+    blob2.metadata = {"sha256": hashlib.sha256(VALID_PNG_BYTES).hexdigest()}
+    blob2.size = len(VALID_PNG_BYTES)
+
+    # Blob 3: fails upload
+    blob3 = MagicMock()
+    blob3.exists.return_value = False
+    blob3.upload_from_string.side_effect = InternalServerError("Slide 3 failure")
+
+    def _blob_factory(name: str):
+        if "slide-1" in name:
+            return blob1
+        if "slide-2" in name:
+            return blob2
+        return blob3
+
+    mock_bucket.blob.side_effect = _blob_factory
+    mock_storage.bucket.return_value = mock_bucket
+
+    uploader = VisualAssetUploader(storage_client=mock_storage, max_retries=1, initial_delay=0.01)
+    slide_renders = {1: VALID_PNG_BYTES, 2: VALID_PNG_BYTES, 3: VALID_PNG_BYTES}
+
+    with pytest.raises(AssetUploadError):
+        uploader.upload_presentation_assets(
+            document_id="doc_pres_selective",
+            slide_renders=slide_renders,
+            rollback_on_failure=True,
+        )
+
+    # Blob 1: newly created -> MUST be deleted!
+    blob1.delete.assert_called_once()
+
+    # Blob 2: existed beforehand -> MUST NOT be deleted!
+    blob2.delete.assert_not_called()
+
+    # Blob 3: failed upload -> MUST NOT be deleted!
+    blob3.delete.assert_not_called()
+
+
+def test_audit_repeated_identical_uploads_remain_idempotent():
+    """Verify that repeated identical uploads skip re-uploading and cause zero mutations."""
+    mock_storage = MagicMock()
+    mock_bucket = MagicMock()
+    mock_blob = MagicMock()
+
+    # Simulate blob already existing with matching SHA-256
+    matching_sha = hashlib.sha256(VALID_PNG_BYTES).hexdigest()
+    mock_blob.exists.return_value = True
+    mock_blob.metadata = {"sha256": matching_sha}
+    mock_blob.size = len(VALID_PNG_BYTES)
+    mock_bucket.blob.return_value = mock_blob
+    mock_storage.bucket.return_value = mock_bucket
+
+    uploader = VisualAssetUploader(storage_client=mock_storage)
+    slide_renders = {1: VALID_PNG_BYTES, 2: VALID_PNG_BYTES}
+
+    # Run upload
+    assets = uploader.upload_presentation_assets(
+        document_id="doc_pres_idemp",
+        slide_renders=slide_renders,
+    )
+
+    # Both must be SKIPPED_EXISTING
+    assert len(assets) == 2
+    assert all(a.action == "SKIPPED_EXISTING" for a in assets)
+
+    # upload_from_string MUST NOT have been called at all!
+    mock_blob.upload_from_string.assert_not_called()

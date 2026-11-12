@@ -88,6 +88,15 @@ class AssetAccessDeniedError(AssetStorageError):
 
 
 @dataclass(frozen=True)
+class PreviousBlobState:
+    """Snapshot of an existing blob prior to being overwritten, used for compensation."""
+
+    content: bytes
+    metadata: dict[str, str]
+    content_type: str | None = None
+
+
+@dataclass(frozen=True)
 class UploadedVisualAsset:
     """Provenance and metadata of a visual asset in Cloud Storage."""
 
@@ -102,7 +111,8 @@ class UploadedVisualAsset:
     content_type: str
     asset_type: str  # "SLIDE" or "IMAGE"
     description: str | None = None
-    action: str = "UPLOADED"  # "UPLOADED", "SKIPPED_EXISTING"
+    action: str = "CREATED"  # "CREATED", "SKIPPED_EXISTING", "OVERWRITTEN"
+    previous_state: PreviousBlobState | None = None
 
     def to_visual_asset_node(self) -> VisualAssetNode:
         """Converts uploaded asset into a validated VisualAssetNode."""
@@ -115,6 +125,19 @@ class UploadedVisualAsset:
             description=self.description,
             asset_type=self.asset_type,
         )
+
+
+def is_temporary_content_url(url: str | None) -> bool:
+    """Returns True if the URL is a temporary Google user content or download URL."""
+    if not url or not isinstance(url, str):
+        return False
+    lower = url.lower().strip()
+    return (
+        "googleusercontent.com" in lower
+        or "docs.google.com/docs/" in lower
+        or "drive.google.com/uc?" in lower
+        or "blob:http" in lower
+    )
 
 
 def generate_slide_visual_id(
@@ -268,12 +291,15 @@ class VisualAssetUploader:
         asset_type: str,
         description: str | None = None,
     ) -> UploadedVisualAsset:
-        """Idempotently uploads a blob to GCS, skipping if identical content exists."""
+        """Idempotently uploads a blob to GCS, preserving original state on overwrites."""
         sha256_hash = hashlib.sha256(content).hexdigest()
         size_bytes = len(content)
         gcs_uri = f"gs://{self.bucket_name}/{object_name}"
 
         blob = self.bucket.blob(object_name)
+
+        previous_state: PreviousBlobState | None = None
+        is_overwrite = False
 
         # Check existing blob for idempotency
         try:
@@ -305,7 +331,35 @@ class VisualAssetUploader:
                         asset_type=asset_type,
                         description=description,
                         action="SKIPPED_EXISTING",
+                        previous_state=None,
                     )
+                else:
+                    # Content differs: download existing state for rollback restoration
+                    is_overwrite = True
+                    try:
+                        prev_bytes = self._execute_with_retry(
+                            f"download previous content for {object_name}",
+                            blob.download_as_bytes,
+                        )
+                        prev_meta = dict(blob.metadata or {})
+                        prev_ct = blob.content_type
+                        previous_state = PreviousBlobState(
+                            content=prev_bytes,
+                            metadata=prev_meta,
+                            content_type=prev_ct,
+                        )
+                        logger.info(
+                            "Captured pre-overwrite state for '%s' (%d bytes, sha256=%s)",
+                            gcs_uri,
+                            len(prev_bytes),
+                            prev_meta.get("sha256", "unknown"),
+                        )
+                    except Exception as prev_err:
+                        logger.warning(
+                            "Could not capture previous state for '%s' prior to overwrite: %s",
+                            object_name,
+                            prev_err,
+                        )
         except AssetStorageError:
             raise
         except Exception as e:
@@ -325,8 +379,10 @@ class VisualAssetUploader:
 
         self._execute_with_retry(f"upload {object_name}", _do_upload)
 
+        action_name = "OVERWRITTEN" if is_overwrite else "CREATED"
         logger.info(
-            "Uploaded visual asset '%s' (%d bytes, sha256=%s)",
+            "%s visual asset '%s' (%d bytes, sha256=%s)",
+            action_name.capitalize(),
             gcs_uri,
             size_bytes,
             sha256_hash[:12],
@@ -344,7 +400,8 @@ class VisualAssetUploader:
             content_type=mime_type,
             asset_type=asset_type,
             description=description,
-            action="UPLOADED",
+            action=action_name,
+            previous_state=previous_state,
         )
 
     def upload_slide_render(
@@ -396,12 +453,22 @@ class VisualAssetUploader:
         vid = visual_id or generate_slide_visual_id(document_id, slide_number, asset_index=image_index)
         desc = description or f"Embedded image on slide {slide_number}"
 
+        # Sanitize source_url: NEVER store temporary contentUrl values
+        safe_source_url = ""
+        if source_url and not is_temporary_content_url(source_url):
+            safe_source_url = source_url.strip()
+        elif source_url and is_temporary_content_url(source_url):
+            logger.debug(
+                "Discarding temporary Google contentUrl from persistent GCS metadata: %s",
+                source_url,
+            )
+
         metadata = {
             "document_id": document_id,
             "slide_number": str(slide_number),
             "image_index": str(image_index),
             "asset_type": "IMAGE",
-            "source_url": source_url or "",
+            "source_url": safe_source_url,
             "object_id": object_id or "",
         }
 
@@ -426,10 +493,12 @@ class VisualAssetUploader:
     ) -> list[UploadedVisualAsset]:
         """Coordinates upload of all slide renders and embedded images for a presentation.
 
-        If rollback_on_failure is True, newly uploaded blobs are deleted if any step fails.
+        If rollback_on_failure is True:
+        - Blobs newly created by this batch are deleted.
+        - Pre-existing blobs that were overwritten are restored to their original content.
+        - Skipped existing blobs remain untouched.
         """
-        newly_uploaded: list[UploadedVisualAsset] = []
-        results: list[UploadedVisualAsset] = []
+        tracked_assets: list[UploadedVisualAsset] = []
 
         try:
             # 1. Slide renders
@@ -440,9 +509,7 @@ class VisualAssetUploader:
                     slide_number=slide_number,
                     image_bytes=render_bytes,
                 )
-                results.append(res)
-                if res.action == "UPLOADED":
-                    newly_uploaded.append(res)
+                tracked_assets.append(res)
 
             # 2. Embedded images
             if embedded_images:
@@ -450,7 +517,8 @@ class VisualAssetUploader:
                     slide_num = int(img_info.get("slide_number", 1))
                     img_idx = int(img_info.get("image_index", 1))
                     content = img_info.get("image_bytes", b"")
-                    source_url = img_info.get("source_url")
+                    raw_source = img_info.get("source_url")
+                    safe_source = None if is_temporary_content_url(raw_source) else raw_source
                     obj_id = img_info.get("object_id")
                     desc = img_info.get("description")
                     v_id = img_info.get("visual_id")
@@ -462,14 +530,12 @@ class VisualAssetUploader:
                         image_bytes=content,
                         visual_id=v_id,
                         description=desc,
-                        source_url=source_url,
+                        source_url=safe_source,
                         object_id=obj_id,
                     )
-                    results.append(res)
-                    if res.action == "UPLOADED":
-                        newly_uploaded.append(res)
+                    tracked_assets.append(res)
 
-            return results
+            return tracked_assets
 
         except Exception as e:
             logger.error(
@@ -477,41 +543,79 @@ class VisualAssetUploader:
                 document_id,
                 e,
             )
-            if rollback_on_failure and newly_uploaded:
+            if rollback_on_failure and tracked_assets:
                 logger.info(
-                    "Rollback on failure: cleaning up %d newly uploaded blobs for doc '%s'...",
-                    len(newly_uploaded),
+                    "Rollback on failure: compensating %d modified blobs for doc '%s'...",
+                    len(tracked_assets),
                     document_id,
                 )
-                self.cleanup_uploaded_assets(newly_uploaded)
+                self.compensate_upload_batch(tracked_assets)
             raise
 
-    def cleanup_uploaded_assets(self, assets: list[UploadedVisualAsset]) -> list[str]:
-        """Compensating cleanup: deletes uploaded blobs from GCS.
+    def compensate_upload_batch(
+        self, assets: list[UploadedVisualAsset]
+    ) -> dict[str, list[str]]:
+        """Compensates a failed upload batch:
 
-        Returns the list of successfully deleted GCS URIs.
+        1. Deletes blobs that were newly CREATED by this batch.
+        2. Restores blobs that were OVERWRITTEN back to their previous content and metadata.
+        3. Leaves SKIPPED_EXISTING blobs untouched.
+
+        Returns {"deleted": [...], "restored": [...]}.
         """
-        deleted_uris: list[str] = []
+        summary: dict[str, list[str]] = {"deleted": [], "restored": []}
+
         for asset in assets:
-            try:
-                blob = self.bucket.blob(asset.object_name)
+            if asset.action == "CREATED":
+                try:
+                    blob = self.bucket.blob(asset.object_name)
 
-                def _do_delete() -> None:
-                    try:
-                        blob.delete()
-                    except NotFound:
-                        pass
+                    def _do_delete() -> None:
+                        try:
+                            blob.delete()
+                        except NotFound:
+                            pass
 
-                self._execute_with_retry(f"delete {asset.object_name}", _do_delete)
-                deleted_uris.append(asset.gcs_uri)
-                logger.info("Deleted compensating blob: %s", asset.gcs_uri)
-            except Exception as e:
-                logger.warning(
-                    "Failed to delete blob '%s' during cleanup: %s",
-                    asset.gcs_uri,
-                    e,
-                )
-        return deleted_uris
+                    self._execute_with_retry(f"delete {asset.object_name}", _do_delete)
+                    summary["deleted"].append(asset.gcs_uri)
+                    logger.info("Rollback deleted newly created blob: %s", asset.gcs_uri)
+                except Exception as e:
+                    logger.warning(
+                        "Failed to delete newly created blob '%s' during rollback: %s",
+                        asset.gcs_uri,
+                        e,
+                    )
+
+            elif asset.action == "OVERWRITTEN" and asset.previous_state is not None:
+                try:
+                    blob = self.bucket.blob(asset.object_name)
+                    prev = asset.previous_state
+                    blob.metadata = dict(prev.metadata)
+
+                    def _do_restore() -> None:
+                        blob.upload_from_string(
+                            prev.content, content_type=prev.content_type
+                        )
+
+                    self._execute_with_retry(f"restore {asset.object_name}", _do_restore)
+                    summary["restored"].append(asset.gcs_uri)
+                    logger.info(
+                        "Rollback restored previous blob state for: %s",
+                        asset.gcs_uri,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "Failed to restore overwritten blob '%s' during rollback: %s",
+                        asset.gcs_uri,
+                        e,
+                    )
+
+        return summary
+
+    def cleanup_uploaded_assets(self, assets: list[UploadedVisualAsset]) -> list[str]:
+        """Compensating cleanup: deletes newly created blobs or restores overwritten blobs."""
+        compensation = self.compensate_upload_batch(assets)
+        return compensation["deleted"]
 
     def delete_asset_by_uri(self, gcs_uri: str) -> bool:
         """Deletes a specific blob by its GCS URI."""
