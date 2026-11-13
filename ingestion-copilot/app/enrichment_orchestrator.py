@@ -710,11 +710,12 @@ class EnrichmentOrchestrator:
                 expected_hash: str | None = None
 
                 for cid, uri in card_rows:
-                    if not uri or "#sha256:" not in uri:
+                    if not uri or ("#sha256=" not in uri and "#sha256:" not in uri):
                         all_cards_okf_valid = False
                         mismatched_uris.append(f"{cid}: invalid_uri={uri}")
                         continue
-                    u_part, s_hash = uri.split("#sha256:", 1)
+                    sep = "#sha256=" if "#sha256=" in uri else "#sha256:"
+                    u_part, s_hash = uri.split(sep, 1)
                     if len(s_hash) != 64:
                         all_cards_okf_valid = False
                         mismatched_uris.append(f"{cid}: bad_sha_len={len(s_hash)}")

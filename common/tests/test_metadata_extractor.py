@@ -4,6 +4,7 @@ Tests schema validation, evidence verification, unsupported claims, unknown tech
 duplicate candidates, relationship grounding, retries, and malformed responses.
 """
 
+import json
 from unittest.mock import MagicMock
 import pytest
 
@@ -587,3 +588,100 @@ def test_generate_card_id_stability():
     assert id1.startswith("card_")
     assert len(id1) == 53
     assert len(id1) <= 64
+
+
+def test_relationship_calls_normalizes_to_connects_to_on_connectivity_evidence():
+    """Verify relationship type CALLS is normalized to CONNECTS_TO when evidence only establishes connectivity."""
+    chunk_text = "Two network paths connect the branch to the order service."
+    raw_response = {
+        "entities": [
+            {
+                "name": "Branch",
+                "category": "FACILITY",
+                "description": "Retail branch site",
+                "chunk_id": "chk_0",
+                "evidence_quote": "branch",
+            },
+            {
+                "name": "Order Service",
+                "category": "SUBSYSTEM",
+                "description": "Order processing service",
+                "chunk_id": "chk_0",
+                "evidence_quote": "order service",
+            },
+        ],
+        "relationships": [
+            {
+                "source_entity_name": "Branch",
+                "source_entity_category": "FACILITY",
+                "target_entity_name": "Order Service",
+                "target_entity_category": "SUBSYSTEM",
+                "relationship_type": "CALLS",
+                "chunk_id": "chk_0",
+                "evidence_quote": "Two network paths connect the branch to the order service.",
+            }
+        ],
+    }
+
+    mock_client = MagicMock()
+    mock_response = MagicMock()
+    mock_response.text = json.dumps(raw_response)
+    mock_client.models.generate_content.return_value = mock_response
+
+    extractor = MetadataExtractor(client=mock_client)
+    result = extractor.extract_from_chunk("chk_0", chunk_text, document_id="doc_net")
+
+    assert len(result.relationships) == 1
+    rel = result.relationships[0]
+    assert rel.relationship_type == "CONNECTS_TO"
+    assert rel.source_name == "Branch"
+    assert rel.target_name == "Order Service"
+    assert rel.source_entity_id.startswith("ent_")
+    assert rel.target_entity_id.startswith("ent_")
+
+
+def test_relationship_calls_preserved_when_invocation_explicit():
+    """Verify relationship type CALLS is preserved when quote explicitly describes invocations or calls."""
+    chunk_text = "The web portal calls the order service API via gRPC."
+    raw_response = {
+        "entities": [
+            {
+                "name": "Web Portal",
+                "category": "SUBSYSTEM",
+                "description": "Customer web portal",
+                "chunk_id": "chk_1",
+                "evidence_quote": "web portal",
+            },
+            {
+                "name": "Order Service",
+                "category": "SUBSYSTEM",
+                "description": "Order processing service",
+                "chunk_id": "chk_1",
+                "evidence_quote": "order service",
+            },
+        ],
+        "relationships": [
+            {
+                "source_entity_name": "Web Portal",
+                "source_entity_category": "SUBSYSTEM",
+                "target_entity_name": "Order Service",
+                "target_entity_category": "SUBSYSTEM",
+                "relationship_type": "CALLS",
+                "chunk_id": "chk_1",
+                "evidence_quote": "web portal calls the order service API",
+            }
+        ],
+    }
+
+    mock_client = MagicMock()
+    mock_response = MagicMock()
+    mock_response.text = json.dumps(raw_response)
+    mock_client.models.generate_content.return_value = mock_response
+
+    extractor = MetadataExtractor(client=mock_client)
+    result = extractor.extract_from_chunk("chk_1", chunk_text, document_id="doc_call")
+
+    assert len(result.relationships) == 1
+    rel = result.relationships[0]
+    assert rel.relationship_type == "CALLS"
+

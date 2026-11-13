@@ -326,7 +326,7 @@ def test_checkpoint_skips_already_completed_document():
             ("chk_img", doc_id, "IMAGE", None, 1, None, None, None),  # IMAGE excluded
         ],
         "SolutionCards": [
-            ("card_1", f"{sidecar_uri}#sha256:{sidecar_hash}")
+            ("card_1", f"{sidecar_uri}#sha256={sidecar_hash}")
         ],
         "SolutionImplementsDoc": [("card_1", doc_id)],
         "EvidenceLinks": [("evl_card_1_chk_1", "card_1", "chk_1", doc_id, 1, None, "Quote for card_1")],
@@ -375,7 +375,7 @@ def test_force_recompute_bypasses_checkpoint():
             ("chk_1", doc_id, "TEXT", "Content 1", 1, None, None, VALID_VEC),
         ],
         "SolutionCards": [
-            ("card_1", f"{sidecar_uri}#sha256:{sidecar_hash}")
+            ("card_1", f"{sidecar_uri}#sha256={sidecar_hash}")
         ],
         "SolutionImplementsDoc": [("card_1", doc_id)],
         "EvidenceLinks": [("evl_card_1_chk_1", "card_1", "chk_1", doc_id, 1, None, "Quote for card_1")],
@@ -588,7 +588,7 @@ def test_checkpoint_fails_when_sidecar_missing_in_gcs():
     """Verify Point 4 fails when sidecar blob does not exist in GCS."""
     doc_id = "doc_missing_sidecar"
     valid_hash = "a" * 64
-    sidecar_uri = f"gs://sales-discovery-mvp-mumbai/metadata/{doc_id}.meta.json#sha256:{valid_hash}"
+    sidecar_uri = f"gs://sales-discovery-mvp-mumbai/metadata/{doc_id}.meta.json#sha256={valid_hash}"
 
     mock_storage = MockStorageClient()  # Empty storage: blob does not exist
     spanner_state = {
@@ -719,7 +719,7 @@ def test_checkpoint_fails_when_solution_implements_doc_missing():
     spanner_state = {
         "Documents": [(doc_id, "ENRICHED")],
         "EvidenceChunks": [("chk_1", doc_id, "TEXT", "Content 1", 1, None, None, VALID_VEC)],
-        "SolutionCards": [("card_1", f"{sidecar_uri}#sha256:{sidecar_hash}")],
+        "SolutionCards": [("card_1", f"{sidecar_uri}#sha256={sidecar_hash}")],
         "SolutionImplementsDoc": [],  # Missing edge!
         "EvidenceLinks": [("evl_card_1_chk_1", "card_1", "chk_1", doc_id, 1, None, "Quote for card_1")],
     }
@@ -756,8 +756,8 @@ def test_checkpoint_fails_when_multiple_cards_have_missing_edges():
             ("chk_2", doc_id, "TEXT", "Content 2", 2, None, None, VALID_VEC),
         ],
         "SolutionCards": [
-            ("card_1", f"{sidecar_uri}#sha256:{sidecar_hash}"),
-            ("card_2", f"{sidecar_uri}#sha256:{sidecar_hash}"),
+            ("card_1", f"{sidecar_uri}#sha256={sidecar_hash}"),
+            ("card_2", f"{sidecar_uri}#sha256={sidecar_hash}"),
         ],
         "SolutionImplementsDoc": [("card_1", doc_id)],  # card_2 missing!
         "EvidenceLinks": [
@@ -794,7 +794,7 @@ def test_rerun_recovery_when_spanner_committed_and_promotion_failed():
     spanner_state = {
         "Documents": [(doc_id, "ENRICHED")],
         "EvidenceChunks": [("chk_1", doc_id, "TEXT", "Content 1", 1, None, None, VALID_VEC)],
-        "SolutionCards": [("card_1", f"{sidecar_uri}#sha256:{sidecar_hash}")],
+        "SolutionCards": [("card_1", f"{sidecar_uri}#sha256={sidecar_hash}")],
         "SolutionImplementsDoc": [("card_1", doc_id)],
         "EvidenceLinks": [("evl_card_1_chk_1", "card_1", "chk_1", doc_id, 1, None, "Quote for card_1")],
     }
@@ -847,7 +847,7 @@ def test_recovery_makes_zero_gemini_and_vertex_calls():
     spanner_state = {
         "Documents": [(doc_id, "ENRICHED")],
         "EvidenceChunks": [("chk_1", doc_id, "TEXT", "Content 1", 1, None, None, VALID_VEC)],
-        "SolutionCards": [("card_1", f"{sidecar_uri}#sha256:{sidecar_hash}")],
+        "SolutionCards": [("card_1", f"{sidecar_uri}#sha256={sidecar_hash}")],
         "SolutionImplementsDoc": [("card_1", doc_id)],
         "EvidenceLinks": [("evl_card_1_chk_1", "card_1", "chk_1", doc_id, 1, None, "Quote for card_1")],
     }
@@ -887,7 +887,7 @@ def test_recovery_handles_missing_or_corrupt_staging_sidecar():
     spanner_state = {
         "Documents": [(doc_id, "ENRICHED")],
         "EvidenceChunks": [("chk_1", doc_id, "TEXT", "Content 1", 1, None, None, VALID_VEC)],
-        "SolutionCards": [("card_1", f"{sidecar_uri}#sha256:{valid_hash}")],
+        "SolutionCards": [("card_1", f"{sidecar_uri}#sha256={valid_hash}")],
         "SolutionImplementsDoc": [("card_1", doc_id)],
         "EvidenceLinks": [("evl_card_1_chk_1", "card_1", "chk_1", doc_id, 1, None, "Quote for card_1")],
     }
@@ -941,8 +941,8 @@ def test_checkpoint_fails_when_evidence_links_missing_for_citation():
             ("chk_2", doc_id, "TEXT", "Content 2", 2, None, None, VALID_VEC),
         ],
         "SolutionCards": [
-            ("card_1", f"{sidecar_uri}#sha256:{sidecar_hash}"),
-            ("card_2", f"{sidecar_uri}#sha256:{sidecar_hash}"),
+            ("card_1", f"{sidecar_uri}#sha256={sidecar_hash}"),
+            ("card_2", f"{sidecar_uri}#sha256={sidecar_hash}"),
         ],
         "SolutionImplementsDoc": [("card_1", doc_id), ("card_2", doc_id)],
         # Only card_1 has EvidenceLink; card_2 is missing!
@@ -976,8 +976,8 @@ def test_checkpoint_fails_when_multiple_cards_have_different_sidecar_hashes():
             ("chk_2", doc_id, "TEXT", "Content 2", 2, None, None, VALID_VEC),
         ],
         "SolutionCards": [
-            ("card_1", f"{sidecar_uri}#sha256:{hash_1}"),
-            ("card_2", f"{sidecar_uri}#sha256:{hash_2}"),  # Divergent hash!
+            ("card_1", f"{sidecar_uri}#sha256={hash_1}"),
+            ("card_2", f"{sidecar_uri}#sha256={hash_2}"),  # Divergent hash!
         ],
         "SolutionImplementsDoc": [("card_1", doc_id), ("card_2", doc_id)],
         "EvidenceLinks": [
@@ -1018,8 +1018,8 @@ def test_fully_complete_checkpoint_skips_all_model_calls_and_writes():
             ("chk_2", doc_id, "TEXT", "Content 2", 2, None, None, VALID_VEC),
         ],
         "SolutionCards": [
-            ("card_1", f"{sidecar_uri}#sha256:{sidecar_hash}"),
-            ("card_2", f"{sidecar_uri}#sha256:{sidecar_hash}"),
+            ("card_1", f"{sidecar_uri}#sha256={sidecar_hash}"),
+            ("card_2", f"{sidecar_uri}#sha256={sidecar_hash}"),
         ],
         "SolutionImplementsDoc": [("card_1", doc_id), ("card_2", doc_id)],
         "EvidenceLinks": [
@@ -1054,4 +1054,45 @@ def test_fully_complete_checkpoint_skips_all_model_calls_and_writes():
     mock_embeddings.embed_texts.assert_not_called()
     mock_extractor.extract_from_document.assert_not_called()
     mock_writer.persist_enrichment.assert_not_called()
+
+
+def test_checkpoint_supports_both_sha256_separator_formats():
+    """Verify check_completion_checkpoint succeeds with both #sha256= and legacy #sha256: formats."""
+    doc_id = "doc_dual_hash_format"
+    cards = ["card_1"]
+    chunks = ["chk_1"]
+    sidecar_data = build_valid_sidecar_json(doc_id, cards, chunks)
+    sidecar_hash = hashlib.sha256(sidecar_data).hexdigest()
+    sidecar_uri = f"gs://sales-discovery-mvp-mumbai/metadata/{doc_id}.meta.json"
+
+    # Test format A: #sha256=<hash>
+    mock_storage_a = MockStorageClient()
+    mock_storage_a.bucket("sales-discovery-mvp-mumbai").blob(f"metadata/{doc_id}.meta.json").upload_from_string(sidecar_data)
+    spanner_state_a = {
+        "Documents": [(doc_id, "ENRICHED")],
+        "EvidenceChunks": [("chk_1", doc_id, "TEXT", "Content 1", 1, None, None, VALID_VEC)],
+        "SolutionCards": [("card_1", f"{sidecar_uri}#sha256={sidecar_hash}")],
+        "SolutionImplementsDoc": [("card_1", doc_id)],
+        "EvidenceLinks": [("evl_card_1_chk_1", "card_1", "chk_1", doc_id, 1, None, "Quote for card_1")],
+    }
+    orch_a = EnrichmentOrchestrator(spanner_database=MockSpannerDb(spanner_state_a), storage_client=mock_storage_a)
+    passed_a, details_a = orch_a.check_completion_checkpoint(doc_id)
+    assert passed_a is True
+    assert details_a["all_cards_okf_valid"] is True
+
+    # Test format B: legacy #sha256:<hash>
+    mock_storage_b = MockStorageClient()
+    mock_storage_b.bucket("sales-discovery-mvp-mumbai").blob(f"metadata/{doc_id}.meta.json").upload_from_string(sidecar_data)
+    spanner_state_b = {
+        "Documents": [(doc_id, "ENRICHED")],
+        "EvidenceChunks": [("chk_1", doc_id, "TEXT", "Content 1", 1, None, None, VALID_VEC)],
+        "SolutionCards": [("card_1", f"{sidecar_uri}#sha256:{sidecar_hash}")],
+        "SolutionImplementsDoc": [("card_1", doc_id)],
+        "EvidenceLinks": [("evl_card_1_chk_1", "card_1", "chk_1", doc_id, 1, None, "Quote for card_1")],
+    }
+    orch_b = EnrichmentOrchestrator(spanner_database=MockSpannerDb(spanner_state_b), storage_client=mock_storage_b)
+    passed_b, details_b = orch_b.check_completion_checkpoint(doc_id)
+    assert passed_b is True
+    assert details_b["all_cards_okf_valid"] is True
+
 

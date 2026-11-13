@@ -310,7 +310,9 @@ Analyze the provided text chunks and extract:
 1. Business/Domain Entities (concepts, subsystems, APIs, business units, standards).
 2. Technologies mentioned (databases, cloud services, tools, frameworks, programming languages).
 3. Business Solution Cards (customer architectures, problems, solutions, outcomes).
-4. Explicit Relationships between entities (e.g. REFERENCES, USES, CALLS, DEPENDS_ON).
+4. Explicit Relationships between entities (e.g. REFERENCES, USES, CALLS, DEPENDS_ON, CONNECTS_TO).
+   - Ensure the relationship type accurately reflects the semantic meaning grounded in the quote.
+   - For network, routing, or physical connectivity, use CONNECTS_TO. Do NOT use CALLS unless explicit service calls, RPCs, or API requests are stated in the quote.
 
 CRITICAL GROUNDING INVARIANTS:
 - Every candidate MUST include the exact source ChunkId and an exact verbatim quote from that chunk.
@@ -833,6 +835,11 @@ class MetadataExtractor:
                 continue
 
             rel_type = cand.relationship_type.strip().upper() if cand.relationship_type else "REFERENCES"
+
+            # Semantics check: normalize CALLS to CONNECTS_TO if evidence only describes connectivity/paths
+            ev_lower = cand.evidence_quote.lower()
+            if rel_type == "CALLS" and ("connect" in ev_lower or "path" in ev_lower) and not any(k in ev_lower for k in ("call", "invok", "rpc", "request", "api call")):
+                rel_type = "CONNECTS_TO"
 
             # Register relationship
             validated_rels[(src_id, tgt_id)] = ValidatedEntityRelationship(

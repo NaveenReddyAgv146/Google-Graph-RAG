@@ -164,7 +164,7 @@ VALID_768_VEC_2 = [0.2] * 768
 def make_initial_state(
     doc_id: str = "doc_acme",
     doc_status: str = "READY",
-    card_status: str = "PENDING_REVIEW",
+    card_status: str = "PENDING",
     has_embeddings: bool = False,
 ) -> dict[str, list[tuple]]:
     """Build a standard mock database state across required tables."""
@@ -334,6 +334,7 @@ def test_persist_enrichment_all_11_tables_fresh_success():
     assert "Entities" in txn.inserts
     assert "Technologies" in txn.inserts
     assert "SolutionCards" in txn.inserts
+    assert txn.inserts["SolutionCards"][0]["VerificationStatus"] == "PENDING"
     assert "SolutionImplementsDoc" in txn.inserts
     assert "ChunkReferencesEntity" in txn.inserts
     assert "ChunkMentionsTech" in txn.inserts
@@ -351,7 +352,7 @@ def test_persist_enrichment_all_11_tables_fresh_success():
 def test_idempotent_rerun_produces_zero_mutations():
     """Verify rerunning enrichment with identical records buffers 0 mutations."""
     # Setup state with everything already enriched
-    state = make_initial_state(doc_id="doc_acme", doc_status="ENRICHED", card_status="PENDING_REVIEW", has_embeddings=True)
+    state = make_initial_state(doc_id="doc_acme", doc_status="ENRICHED", card_status="PENDING", has_embeddings=True)
     # Add existing entities and tech to state
     state["Entities"].append(("ent_inventory_core", "Inventory Core", "SUBSYSTEM", "Core inventory subsystem"))
     state["Technologies"].append(("tech_cloud_spanner", "Cloud Spanner", "Database", None))
@@ -622,9 +623,9 @@ def test_referential_integrity_unknown_chunk_in_edge():
 
 def test_evidence_links_and_okf_uri_format():
     """Verify EvidenceLinks citation row is generated and OkfUri formatted correctly."""
-    assert format_okf_uri("gs://b/meta.json", "sha123") == "gs://b/meta.json#sha256:sha123"
+    assert format_okf_uri("gs://b/meta.json", "sha123") == "gs://b/meta.json#sha256=sha123"
     assert format_okf_uri("gs://b/meta.json", None) == "gs://b/meta.json"
-    assert format_okf_uri(None, "sha123") == "#sha256:sha123"
+    assert format_okf_uri(None, "sha123") == "#sha256=sha123"
     assert format_okf_uri(None, None) is None
 
     ev_id1 = generate_evidence_link_id("card_1", "chk_1", "Quote text")
@@ -668,8 +669,8 @@ def test_transaction_rollback_on_failure():
 
 
 def test_force_recompute_updates_unapproved_solution_card():
-    """Verify force_recompute=True updates fields on an unapproved (PENDING_REVIEW) card."""
-    state = make_initial_state(doc_id="doc_acme", card_status="PENDING_REVIEW")
+    """Verify force_recompute=True updates fields on an unapproved (PENDING) card."""
+    state = make_initial_state(doc_id="doc_acme", card_status="PENDING")
     db = MockSpannerDatabase(state)
     writer = EnrichmentWriter(database=db)
 
@@ -697,4 +698,40 @@ def test_force_recompute_updates_unapproved_solution_card():
     txn = db.last_transaction
     assert "SolutionCards" in txn.updates
     assert txn.updates["SolutionCards"][0]["ProjectName"] == "Acme Modernization v2"
+
+
+def test_solution_card_verification_status_is_pending():
+    """Verify newly inserted SolutionCards receive VerificationStatus='PENDING'."""
+    state = make_initial_state(doc_id="doc_acme")
+    state["SolutionCards"] = []
+    state["SolutionImplementsDoc"] = []
+    db = MockSpannerDatabase(state)
+    writer = EnrichmentWriter(database=db)
+
+    payload = EnrichmentPayload(
+        document_id="doc_acme",
+        solution_cards=[
+            ValidatedSolutionCard(
+                card_id="card_new",
+                document_id="doc_acme",
+                project_name="New Project",
+                business_problem="Problem",
+                proposed_solution="Proposed",
+                implemented_solution="Implemented",
+                outcome="Outcome",
+                chunk_id="chk_1",
+                evidence_quote="Modernized using Cloud Spanner",
+            )
+        ],
+    )
+
+    result = writer.persist_enrichment(payload)
+    assert result.solution_cards_inserted == 1
+    txn = db.last_transaction
+    assert "SolutionCards" in txn.inserts
+    card_row = txn.inserts["SolutionCards"][0]
+    assert card_row["CardId"] == "card_new"
+    assert card_row["VerificationStatus"] == "PENDING"
+    assert card_row["VerificationStatus"] in ("DRAFT", "PENDING", "APPROVED")
+
 

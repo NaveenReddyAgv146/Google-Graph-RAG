@@ -187,11 +187,11 @@ def generate_evidence_link_id(card_id: str, chunk_id: str, quote: str = "") -> s
 def format_okf_uri(sidecar_uri: str | None, sidecar_sha256: str | None) -> str | None:
     """Format durable GCS sidecar hash reference for SolutionCards.OkfUri."""
     if sidecar_uri and sidecar_sha256:
-        return f"{sidecar_uri}#sha256:{sidecar_sha256}"
+        return f"{sidecar_uri}#sha256={sidecar_sha256}"
     if sidecar_uri:
         return sidecar_uri
     if sidecar_sha256:
-        return f"#sha256:{sidecar_sha256}"
+        return f"#sha256={sidecar_sha256}"
     return None
 
 
@@ -589,7 +589,7 @@ class EnrichmentWriter:
                     cards_unchanged += 1
             else:
                 card_inserts.append(
-                    (cid, doc_id, p_name, b_prob, p_sol, i_sol, outcome, "PENDING_REVIEW", okf_uri_val)
+                    (cid, doc_id, p_name, b_prob, p_sol, i_sol, outcome, "PENDING", okf_uri_val)
                 )
                 cards_inserted += 1
 
