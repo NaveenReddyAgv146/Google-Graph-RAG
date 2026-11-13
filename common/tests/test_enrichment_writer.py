@@ -735,3 +735,134 @@ def test_solution_card_verification_status_is_pending():
     assert card_row["VerificationStatus"] in ("DRAFT", "PENDING", "APPROVED")
 
 
+def test_enrichment_writer_updates_legacy_card_okf_uri_preserving_status_and_content():
+    """Verify legacy SolutionCard with out-of-date/unhashed OkfUri has ONLY OkfUri updated.
+
+    Preserves CardId, ProjectName, BusinessProblem, ProposedSolution, ImplementedSolution,
+    Outcome, VerificationStatus (DRAFT and APPROVED), and existing SolutionImplementsDoc edge.
+    """
+    doc_id = "doc_multi_card"
+    legacy_draft_id = "card_legacy_draft"
+    legacy_approved_id = "card_legacy_approved"
+
+    state = {
+        "Documents": [(doc_id, "READY")],
+        "EvidenceChunks": [
+            ("chk_1", "TEXT", "Some text content for doc", 1, None, None, doc_id),
+        ],
+        "Entities": [],
+        "Technologies": [],
+        "SolutionCards": [
+            # Legacy DRAFT card with unhashed URI and null content
+            (
+                legacy_draft_id,
+                doc_id,
+                "Legacy Draft Project",
+                None,  # Null business problem
+                None,  # Null proposed solution
+                None,  # Null implemented solution
+                None,  # Null outcome
+                "DRAFT",
+                f"gs://bucket/metadata/{doc_id}.json",  # Unhashed legacy URI
+            ),
+            # Legacy APPROVED card with existing approved content
+            (
+                legacy_approved_id,
+                doc_id,
+                "Legacy Approved Architecture",
+                "Human approved problem",
+                "Human approved proposed",
+                "Human approved implemented",
+                "Human approved outcome",
+                "APPROVED",
+                f"gs://bucket/metadata/{doc_id}.json",  # Unhashed legacy URI
+            ),
+        ],
+        "SolutionImplementsDoc": [
+            (legacy_draft_id, doc_id),
+            (legacy_approved_id, doc_id),
+        ],
+        "ChunkReferencesEntity": [],
+        "ChunkMentionsTech": [],
+        "SolutionSupportsTech": [],
+        "EntityReferencesEntity": [],
+        "EvidenceLinks": [],
+    }
+
+    db = MockSpannerDatabase(state)
+    writer = EnrichmentWriter(database=db)
+
+    canonical_uri = f"gs://bucket/metadata/{doc_id}.meta.json"
+    canonical_hash = "a" * 64
+    expected_okf = f"{canonical_uri}#sha256={canonical_hash}"
+
+    payload = EnrichmentPayload(
+        document_id=doc_id,
+        chunk_embeddings={"chk_1": VALID_768_VEC_1},
+        solution_cards=[
+            ValidatedSolutionCard(
+                card_id="card_canonical_new",
+                document_id=doc_id,
+                project_name="Canonical Enriched Solution",
+                business_problem="Real problem",
+                proposed_solution="Real proposed",
+                implemented_solution="Real implemented",
+                outcome="Real outcome",
+                chunk_id="chk_1",
+                evidence_quote="Some text content for doc",
+            )
+        ],
+        sidecar_uri=canonical_uri,
+        sidecar_sha256=canonical_hash,
+    )
+
+    result = writer.persist_enrichment(payload)
+
+    # 1 new card inserted, 2 legacy cards updated (OkfUri only)
+    assert result.solution_cards_inserted == 1
+    assert result.solution_cards_updated == 2
+
+    txn = db.last_transaction
+
+    # 1. New card inserted with PENDING status and canonical OkfUri
+    assert "SolutionCards" in txn.inserts
+    inserted_cards = txn.inserts["SolutionCards"]
+    assert len(inserted_cards) == 1
+    assert inserted_cards[0]["CardId"] == "card_canonical_new"
+    assert inserted_cards[0]["VerificationStatus"] == "PENDING"
+    assert inserted_cards[0]["OkfUri"] == expected_okf
+
+    # 2. Legacy cards updated: ONLY OkfUri is changed
+    assert "SolutionCards" in txn.updates
+    updated_cards = {r["CardId"]: r for r in txn.updates["SolutionCards"]}
+    assert len(updated_cards) == 2
+    assert legacy_draft_id in updated_cards
+    assert legacy_approved_id in updated_cards
+
+    draft_upd = updated_cards[legacy_draft_id]
+    assert draft_upd["ProjectName"] == "Legacy Draft Project"
+    assert draft_upd["BusinessProblem"] is None
+    assert draft_upd["ProposedSolution"] is None
+    assert draft_upd["ImplementedSolution"] is None
+    assert draft_upd["Outcome"] is None
+    assert draft_upd["OkfUri"] == expected_okf
+
+    appr_upd = updated_cards[legacy_approved_id]
+    assert appr_upd["ProjectName"] == "Legacy Approved Architecture"
+    assert appr_upd["BusinessProblem"] == "Human approved problem"
+    assert appr_upd["ProposedSolution"] == "Human approved proposed"
+    assert appr_upd["ImplementedSolution"] == "Human approved implemented"
+    assert appr_upd["Outcome"] == "Human approved outcome"
+    assert appr_upd["OkfUri"] == expected_okf
+
+    # VerificationStatus is NOT in update columns -> strictly preserved
+    for col_dict in txn.updates["SolutionCards"]:
+        assert "VerificationStatus" not in col_dict
+
+    # 3. Existing SolutionImplementsDoc edges preserved, only new card edge inserted
+    assert "SolutionImplementsDoc" in txn.inserts
+    assert len(txn.inserts["SolutionImplementsDoc"]) == 1
+    assert txn.inserts["SolutionImplementsDoc"][0]["CardId"] == "card_canonical_new"
+
+
+

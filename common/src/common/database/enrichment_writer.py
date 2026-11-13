@@ -593,6 +593,29 @@ class EnrichmentWriter:
                 )
                 cards_inserted += 1
 
+        # Check existing cards for this document not present in payload.solution_cards (e.g. legacy placeholder cards)
+        # Safely align OkfUri to the document's canonical sidecar hash if out-of-date,
+        # preserving ProjectName, BusinessProblem, ProposedSolution, ImplementedSolution, Outcome, and VerificationStatus.
+        payload_card_ids = {c.card_id for c in payload.solution_cards}
+        for existing_cid, existing_row in existing_cards.items():
+            if existing_cid not in payload_card_ids:
+                existing_okf = existing_row[8]
+                if okf_uri_val and existing_okf != okf_uri_val:
+                    card_updates.append(
+                        (
+                            existing_cid,
+                            existing_row[2],  # ProjectName
+                            existing_row[3],  # BusinessProblem
+                            existing_row[4],  # ProposedSolution
+                            existing_row[5],  # ImplementedSolution
+                            existing_row[6],  # Outcome
+                            okf_uri_val,
+                        )
+                    )
+                    cards_updated += 1
+                else:
+                    cards_unchanged += 1
+
         if card_inserts:
             transaction.insert(
                 "SolutionCards",

@@ -747,13 +747,39 @@ class EnrichmentOrchestrator:
                 details["evidence_links_count"] = len(ev_rows)
                 details["evidence_link_rows"] = ev_rows
 
+                # Determine expected cards for evidence validation:
+                # If provenance manifest exists in GCS (canonical or staging), only cards declared with citations
+                # in the manifest are expected to have EvidenceLinks (legacy placeholder cards have no citations).
+                expected_ev_card_ids: set[str] = set()
+                sidecar_bytes: bytes | None = None
+                if canonical_uri and self.storage_client:
+                    can_exists, can_hash, can_data = self._fetch_and_verify_gcs_blob(canonical_uri)
+                    if can_exists and can_data:
+                        sidecar_bytes = can_data
+                    else:
+                        stg_uri = f"gs://{self.settings.gcs_mumbai_bucket}/metadata/staging/{document_id}.meta.json.tmp"
+                        stg_exists, _, stg_data = self._fetch_and_verify_gcs_blob(stg_uri)
+                        if stg_exists and stg_data:
+                            sidecar_bytes = stg_data
+
+                if sidecar_bytes:
+                    try:
+                        m_data = json.loads(sidecar_bytes.decode("utf-8"))
+                        m_citations = self._extract_manifest_citations(m_data)
+                        expected_ev_card_ids = {c["card_id"] for c in m_citations if c.get("card_id")}
+                    except Exception:
+                        expected_ev_card_ids = set()
+
+                if not expected_ev_card_ids:
+                    expected_ev_card_ids = set(card_ids)
+
                 cards_with_evidence = {r[1] for r in ev_rows if len(r) > 1 and r[1]}
-                missing_ev_cards = [cid for cid in card_ids if cid not in cards_with_evidence]
+                missing_ev_cards = [cid for cid in sorted(expected_ev_card_ids) if cid not in cards_with_evidence]
                 invalid_ev_chunks = [r[0] for r in ev_rows if len(r) <= 2 or not r[2] or r[2] not in all_doc_chunk_ids]
                 invalid_ev_ids = [r[0] for r in ev_rows if not r[0] or not str(r[0]).startswith("evl_")]
 
                 spanner_ev_complete = (
-                    len(ev_rows) >= len(card_ids)
+                    len(ev_rows) >= len(expected_ev_card_ids)
                     and len(missing_ev_cards) == 0
                     and len(invalid_ev_chunks) == 0
                     and len(invalid_ev_ids) == 0

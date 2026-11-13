@@ -1096,3 +1096,132 @@ def test_checkpoint_supports_both_sha256_separator_formats():
     assert details_b["all_cards_okf_valid"] is True
 
 
+def test_checkpoint_succeeds_with_legacy_and_canonical_cards_sharing_sidecar_hash():
+    """Verify checkpoint succeeds when multiple cards (legacy + canonical) share the canonical sidecar hash."""
+    doc_id = "doc_multi_card_sharing_hash"
+    canonical_card = "card_canonical_1"
+    legacy_card = "card_legacy_draft"
+    chunks = ["chk_1"]
+
+    # Manifest only declares citations for the canonical card
+    sidecar_data = build_valid_sidecar_json(doc_id, [canonical_card], chunks)
+    sidecar_hash = hashlib.sha256(sidecar_data).hexdigest()
+    sidecar_uri = f"gs://sales-discovery-mvp-mumbai/metadata/{doc_id}.meta.json"
+
+    mock_storage = MockStorageClient()
+    mock_storage.bucket("sales-discovery-mvp-mumbai").blob(f"metadata/{doc_id}.meta.json").upload_from_string(sidecar_data)
+
+    spanner_state = {
+        "Documents": [(doc_id, "ENRICHED")],
+        "EvidenceChunks": [("chk_1", doc_id, "TEXT", "Content 1", 1, None, None, VALID_VEC)],
+        "SolutionCards": [
+            (legacy_card, f"{sidecar_uri}#sha256={sidecar_hash}"),
+            (canonical_card, f"{sidecar_uri}#sha256={sidecar_hash}"),
+        ],
+        "SolutionImplementsDoc": [(legacy_card, doc_id), (canonical_card, doc_id)],
+        "EvidenceLinks": [("evl_can_1", canonical_card, "chk_1", doc_id, 1, None, "Quote for card")],
+    }
+
+    orch = EnrichmentOrchestrator(spanner_database=MockSpannerDb(spanner_state), storage_client=mock_storage)
+    passed, details = orch.check_completion_checkpoint(doc_id)
+
+    assert passed is True
+    assert details["all_points_passed"] is True
+    assert details["all_cards_okf_valid"] is True
+    assert details["spanner_evidence_complete"] is True
+    assert details["solution_implements_doc_complete"] is True
+    assert details["citation_manifest_verified"] is True
+    assert len(details["missing_evidence_cards"]) == 0
+
+
+def test_checkpoint_fails_when_legacy_card_has_unhashed_or_mismatched_uri():
+    """Verify Point 3b fails when a legacy card retains an unhashed or mismatched OkfUri."""
+    doc_id = "doc_mixed_uri_mismatch"
+    canonical_card = "card_canonical_1"
+    legacy_card = "card_legacy_draft"
+    chunks = ["chk_1"]
+
+    sidecar_data = build_valid_sidecar_json(doc_id, [canonical_card], chunks)
+    sidecar_hash = hashlib.sha256(sidecar_data).hexdigest()
+    sidecar_uri = f"gs://sales-discovery-mvp-mumbai/metadata/{doc_id}.meta.json"
+
+    mock_storage = MockStorageClient()
+    mock_storage.bucket("sales-discovery-mvp-mumbai").blob(f"metadata/{doc_id}.meta.json").upload_from_string(sidecar_data)
+
+    spanner_state = {
+        "Documents": [(doc_id, "ENRICHED")],
+        "EvidenceChunks": [("chk_1", doc_id, "TEXT", "Content 1", 1, None, None, VALID_VEC)],
+        "SolutionCards": [
+            # Legacy card with unhashed URI
+            (legacy_card, f"gs://sales-discovery-mvp-mumbai/metadata/{doc_id}.json"),
+            # Canonical card with hashed URI
+            (canonical_card, f"{sidecar_uri}#sha256={sidecar_hash}"),
+        ],
+        "SolutionImplementsDoc": [(legacy_card, doc_id), (canonical_card, doc_id)],
+        "EvidenceLinks": [("evl_can_1", canonical_card, "chk_1", doc_id, 1, None, "Quote for card")],
+    }
+
+    orch = EnrichmentOrchestrator(spanner_database=MockSpannerDb(spanner_state), storage_client=mock_storage)
+    passed, details = orch.check_completion_checkpoint(doc_id)
+
+    assert passed is False
+    assert details["all_cards_okf_valid"] is False
+    assert any(legacy_card in m for m in details["mismatched_card_uris"])
+    assert details["all_points_passed"] is False
+
+
+def test_recovery_succeeds_with_mixed_legacy_and_canonical_cards():
+    """Verify recovery succeeds and promotes sidecar when both legacy and canonical cards exist."""
+    doc_id = "doc_recovery_mixed_cards"
+    canonical_card = "card_canonical_1"
+    legacy_card = "card_legacy_draft"
+    chunks = ["chk_1"]
+
+    sidecar_data = build_valid_sidecar_json(doc_id, [canonical_card], chunks)
+    sidecar_hash = hashlib.sha256(sidecar_data).hexdigest()
+    sidecar_uri = f"gs://sales-discovery-mvp-mumbai/metadata/{doc_id}.meta.json"
+
+    mock_storage = MockStorageClient()
+    bucket = mock_storage.bucket("sales-discovery-mvp-mumbai")
+    # Only staging exists initially
+    staging_blob = bucket.blob(f"metadata/staging/{doc_id}.meta.json.tmp")
+    staging_blob.upload_from_string(sidecar_data)
+    canonical_blob = bucket.blob(f"metadata/{doc_id}.meta.json")
+
+    spanner_state = {
+        "Documents": [(doc_id, "ENRICHED")],
+        "EvidenceChunks": [("chk_1", doc_id, "TEXT", "Content 1", 1, None, None, VALID_VEC)],
+        "SolutionCards": [
+            (legacy_card, f"{sidecar_uri}#sha256={sidecar_hash}"),
+            (canonical_card, f"{sidecar_uri}#sha256={sidecar_hash}"),
+        ],
+        "SolutionImplementsDoc": [(legacy_card, doc_id), (canonical_card, doc_id)],
+        "EvidenceLinks": [("evl_can_1", canonical_card, "chk_1", doc_id, 1, None, "Quote for card")],
+    }
+
+    mock_embeddings = MagicMock(spec=VertexEmbeddingsClient)
+    mock_extractor = MagicMock(spec=MetadataExtractor)
+    mock_writer = MagicMock(spec=EnrichmentWriter)
+
+    orch = EnrichmentOrchestrator(
+        spanner_database=MockSpannerDb(spanner_state),
+        storage_client=mock_storage,
+        embeddings_client=mock_embeddings,
+        metadata_extractor=mock_extractor,
+        enrichment_writer=mock_writer,
+    )
+
+    result = orch.run(doc_id, dry_run=False, force_recompute=False)
+
+    assert result.status == EnrichmentStatus.SUCCESS
+    assert result.stage == EnrichmentStage.COMPLETED
+    assert canonical_blob.exists() is True
+    assert staging_blob.exists() is False
+
+    # 0 model calls made
+    mock_embeddings.embed_texts.assert_not_called()
+    mock_extractor.extract_from_document.assert_not_called()
+    mock_writer.persist_enrichment.assert_not_called()
+
+
+
