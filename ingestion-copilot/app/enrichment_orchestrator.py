@@ -319,11 +319,32 @@ class EnrichmentOrchestrator:
                 ere_count = len(metadata_result.relationships)
                 evl_count = len(metadata_result.solution_cards)
 
+                # Query existing cards in Spanner to include legacy cards requiring OkfUri alignment
+                legacy_card_updates = 0
+                if self.spanner_database:
+                    try:
+                        with self.spanner_database.snapshot(multi_use=True) as snap:
+                            existing_cards_sql = "SELECT CardId, OkfUri FROM SolutionCards WHERE DocumentId = @doc_id"
+                            existing_rows = list(
+                                snap.execute_sql(
+                                    existing_cards_sql,
+                                    params={"doc_id": clean_doc_id},
+                                    param_types={"doc_id": spanner.param_types.STRING},
+                                )
+                            )
+                            payload_cids = {c.card_id for c in metadata_result.solution_cards}
+                            canonical_okf = f"{sidecar_uri}#sha256={sidecar_sha256}"
+                            for ecid, eokf in existing_rows:
+                                if ecid not in payload_cids and eokf != canonical_okf:
+                                    legacy_card_updates += 1
+                    except Exception as exc:
+                        logger.debug("Dry-run existing cards inspection notice: %s", exc)
+
                 projected_table_mutations = {
                     "EvidenceChunks": len(chunk_embeddings),
                     "Entities": len(metadata_result.entities),
                     "Technologies": len(metadata_result.technologies),
-                    "SolutionCards": len(metadata_result.solution_cards),
+                    "SolutionCards": len(metadata_result.solution_cards) + legacy_card_updates,
                     "ChunkReferencesEntity": cre_count,
                     "ChunkMentionsTech": cmt_count,
                     "SolutionSupportsTech": sst_count,
