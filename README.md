@@ -1,6 +1,6 @@
 # Enterprise Agentic GraphRAG
 
-Enterprise-grade Agentic GraphRAG solution ingesting internal business knowledge from PDFs, Google Slides, and GitHub repositories into a connected Google Cloud Spanner property graph, enabling natural-language solution discovery with verifiable provenance, line-level code citations, and visual assets.
+Enterprise-grade Agentic GraphRAG solution ingesting internal business knowledge from PDFs and Google Slides (with GitHub repository AST ingestion deferred as a future extension outside current MVP scope) into a connected Google Cloud Spanner property graph, enabling natural-language solution discovery with verifiable provenance, line-level code citations, and visual assets.
 
 ---
 
@@ -20,8 +20,8 @@ enterprise-graphrag/
 1. **`ingestion-copilot`**:
    - **Deployment Target:** Cloud Run (`asia-south1`)
    - **Template:** Google ADK Python (`adk_python`)
-   - **Role:** Asynchronous document ingestion (PDF Document AI layout parsing, Google Slides text/image extraction, GitHub AST analysis), chunking, 768-dim vector embeddings, and Spanner Graph commits.
-   - **Trigger:** Cloud Storage & GitHub webhooks via authenticated Pub/Sub.
+   - **Role:** Asynchronous document ingestion (PDF Document AI layout parsing, Google Slides text/image extraction; GitHub AST analysis deferred as a future extension), chunking, 768-dim vector embeddings, and Spanner Graph commits.
+   - **Trigger:** Cloud Storage & Google Slides events via authenticated Pub/Sub.
 
 2. **`discovery-copilot`**:
    - **Deployment Target:** Google Agent Runtime (`asia-south1`)
@@ -30,7 +30,7 @@ enterprise-graphrag/
    - **UI Interface:** A2UI declarative cards & A2A protocol.
 
 3. **`common`**:
-   - **Role:** Shared knowledge plane, Spanner Graph ISO GQL schema definitions, Pydantic node/edge models, dual-bucket storage resolver, and deterministic MMR reranking engine.
+   - **Role:** Shared knowledge plane, Spanner Graph ISO GQL schema definitions (preserving all Repository and code node/edge tables for future extension), Pydantic node/edge models, dual-bucket storage resolver, and deterministic MMR reranking engine.
 
 ---
 
@@ -63,7 +63,9 @@ uv run pytest tests/unit
 
 ---
 
-## Manual PDF Ingestion Test Runner (Phase 3A)
+## Manual Ingestion Test Runners
+
+### PDF Ingestion Runner (Phase 3A)
 
 To manually ingest a single PDF from Cloud Storage through the Document AI layout parser, chunk normalizer, and transactional Spanner writer:
 
@@ -73,5 +75,17 @@ uv run python scripts/ingest_pdf_manual.py gs://sales-discovery-mvp-mumbai/white
 
 # Dry run (executes download, Document AI layout parsing, chunk normalization; skips Spanner writes)
 uv run python scripts/ingest_pdf_manual.py gs://sales-discovery-mvp-mumbai/whitepapers/sample.pdf --dry-run
+```
+
+### Google Slides Ingestion Runner (Phase 3B)
+
+To manually ingest a Google Slides presentation through Google Slides API fetch, content extraction, GCS visual asset storage, and transactional Spanner writer:
+
+```bash
+# Ingest single presentation with live Spanner persistence and GCS visual assets
+uv run python scripts/ingest_slides_manual.py <presentation_id_or_url>
+
+# Dry run (executes presentation fetch, extraction, and normalization; skips GCS uploads and Spanner writes)
+uv run python scripts/ingest_slides_manual.py <presentation_id_or_url> --dry-run
 ```
 

@@ -367,12 +367,36 @@ class GoogleSlidesOrchestrator:
                         duration_ms=elapsed_ms,
                     )
 
+            embedded_images_payload: list[dict[str, Any]] = []
+            if getattr(normalized_presentation, "extracted_images", None):
+                logger.info(f"Downloading {len(normalized_presentation.extracted_images)} embedded images...")
+                for img_idx, img_meta in enumerate(normalized_presentation.extracted_images, start=1):
+                    if img_meta.content_url:
+                        try:
+                            if hasattr(self.slides_client, "_default_download_bytes"):
+                                img_bytes = self.slides_client._default_download_bytes(img_meta.content_url)
+                            else:
+                                import requests
+                                resp = requests.get(img_meta.content_url, timeout=30.0)
+                                resp.raise_for_status()
+                                img_bytes = resp.content
+                            embedded_images_payload.append({
+                                "slide_number": img_meta.slide_number,
+                                "image_index": img_idx,
+                                "image_bytes": img_bytes,
+                                "source_url": img_meta.source_url,
+                                "object_id": img_meta.object_id,
+                                "description": img_meta.description or img_meta.title,
+                            })
+                        except Exception as img_err:
+                            logger.warning(f"Failed to download embedded image {img_meta.object_id}: {img_err}")
+
             try:
                 logger.info(f"Uploading visual assets to GCS for doc '{doc_id}'...")
                 uploaded_assets = self.asset_uploader.upload_presentation_assets(
                     document_id=doc_id,
                     slide_renders=slide_renders,
-                    embedded_images=None,
+                    embedded_images=embedded_images_payload if embedded_images_payload else None,
                     rollback_on_failure=True,
                 )
                 # Synchronize normalized presentation with uploaded visual asset nodes
