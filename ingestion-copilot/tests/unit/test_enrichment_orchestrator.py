@@ -121,10 +121,27 @@ class MockSpannerSnapshot:
 
         if "FROM SOLUTIONCARDS WHERE DOCUMENTID = @DOC_ID" in norm:
             doc_id = params.get("doc_id")
-            return self.state.get("SolutionCards", [])
+            rows = [r for r in self.state.get("SolutionCards", []) if len(r) == 2 or r[1] == doc_id]
+            return [(r[0], r[1] if len(r) == 2 else r[2]) for r in rows]
 
-        if "SELECT COUNT(1) FROM EVIDENCELINKS WHERE DOCUMENTID = @DOC_ID" in norm:
-            return [[len(self.state.get("EvidenceLinks", []))]]
+        if "FROM SOLUTIONIMPLEMENTSDOC WHERE DOCUMENTID = @DOC_ID" in norm:
+            doc_id = params.get("doc_id")
+            rows = [r for r in self.state.get("SolutionImplementsDoc", []) if len(r) < 2 or r[1] == doc_id]
+            return [(r[0], r[1] if len(r) > 1 else doc_id) for r in rows]
+
+        if "FROM EVIDENCELINKS WHERE DOCUMENTID = @DOC_ID" in norm:
+            doc_id = params.get("doc_id")
+            if "SELECT COUNT(1)" in norm:
+                return [[len(self.state.get("EvidenceLinks", []))]]
+            rows = [r for r in self.state.get("EvidenceLinks", []) if len(r) < 4 or r[3] == doc_id]
+            out = []
+            for r in rows:
+                ev_id = r[0]
+                c_id = r[1] if len(r) > 1 else "card_1"
+                chk_id = r[2] if len(r) > 2 else "chk_1"
+                note = r[6] if len(r) > 6 else (r[3] if len(r) == 4 else None)
+                out.append((ev_id, c_id, chk_id, note))
+            return out
 
         return []
 
@@ -140,6 +157,44 @@ class MockSpannerDb:
 
 
 VALID_VEC = [0.1] * 768
+
+
+def build_valid_sidecar_json(
+    doc_id: str,
+    card_ids: list[str] | None = None,
+    chunk_ids: list[str] | None = None,
+) -> bytes:
+    """Build valid JSON bytes matching the complete provenance manifest."""
+    cards = card_ids or ["card_1"]
+    chunks = chunk_ids or ["chk_1"] * len(cards)
+
+    data = {
+        "document_id": doc_id,
+        "solution_cards": [
+            {
+                "card_id": cid,
+                "project_name": "Test Modernization",
+                "business_problem": "Latency",
+                "proposed_solution": "Spanner",
+                "implemented_solution": "Spanner + BigQuery",
+                "outcome": "Success",
+                "chunk_id": chk,
+                "evidence_quote": f"Quote for {cid}",
+                "technologies": ["tech_cloud_spanner"],
+            }
+            for cid, chk in zip(cards, chunks)
+        ],
+        "citations": [
+            {
+                "evidence_id": f"evl_{cid}_{chk}",
+                "card_id": cid,
+                "chunk_id": chk,
+                "evidence_quote": f"Quote for {cid}",
+            }
+            for cid, chk in zip(cards, chunks)
+        ],
+    }
+    return json.dumps(data).encode("utf-8")
 
 
 def build_mock_metadata_result(doc_id: str) -> ExtractedMetadataResult:
@@ -253,7 +308,7 @@ def test_enrichment_orchestrator_dry_run():
 def test_checkpoint_skips_already_completed_document():
     """Verify already-enriched document passing all 4 checkpoint criteria is skipped without model calls."""
     doc_id = "doc_already_done"
-    sidecar_data = b'{"document_id": "doc_already_done"}'
+    sidecar_data = build_valid_sidecar_json(doc_id, ["card_1"], ["chk_1"])
     sidecar_hash = hashlib.sha256(sidecar_data).hexdigest()
     sidecar_uri = f"gs://sales-discovery-mvp-mumbai/metadata/{doc_id}.meta.json"
 
@@ -273,7 +328,8 @@ def test_checkpoint_skips_already_completed_document():
         "SolutionCards": [
             ("card_1", f"{sidecar_uri}#sha256:{sidecar_hash}")
         ],
-        "EvidenceLinks": [("evl_1",)],
+        "SolutionImplementsDoc": [("card_1", doc_id)],
+        "EvidenceLinks": [("evl_card_1_chk_1", "card_1", "chk_1", doc_id, 1, None, "Quote for card_1")],
     }
 
     mock_db = MockSpannerDb(spanner_state)
@@ -304,7 +360,7 @@ def test_checkpoint_skips_already_completed_document():
 def test_force_recompute_bypasses_checkpoint():
     """Verify force_recompute=True re-enriches even when checkpoint is complete."""
     doc_id = "doc_force_recompute"
-    sidecar_data = b'{"document_id": "doc_force_recompute"}'
+    sidecar_data = build_valid_sidecar_json(doc_id, ["card_1"], ["chk_1"])
     sidecar_hash = hashlib.sha256(sidecar_data).hexdigest()
     sidecar_uri = f"gs://sales-discovery-mvp-mumbai/metadata/{doc_id}.meta.json"
 
@@ -321,7 +377,8 @@ def test_force_recompute_bypasses_checkpoint():
         "SolutionCards": [
             ("card_1", f"{sidecar_uri}#sha256:{sidecar_hash}")
         ],
-        "EvidenceLinks": [("evl_1",)],
+        "SolutionImplementsDoc": [("card_1", doc_id)],
+        "EvidenceLinks": [("evl_card_1_chk_1", "card_1", "chk_1", doc_id, 1, None, "Quote for card_1")],
     }
 
     mock_db = MockSpannerDb(spanner_state)
@@ -530,7 +587,8 @@ def test_no_eligible_chunks_skips_cleanly():
 def test_checkpoint_fails_when_sidecar_missing_in_gcs():
     """Verify Point 4 fails when sidecar blob does not exist in GCS."""
     doc_id = "doc_missing_sidecar"
-    sidecar_uri = f"gs://sales-discovery-mvp-mumbai/metadata/{doc_id}.meta.json#sha256:dummyhash"
+    valid_hash = "a" * 64
+    sidecar_uri = f"gs://sales-discovery-mvp-mumbai/metadata/{doc_id}.meta.json#sha256:{valid_hash}"
 
     mock_storage = MockStorageClient()  # Empty storage: blob does not exist
     spanner_state = {
@@ -539,7 +597,8 @@ def test_checkpoint_fails_when_sidecar_missing_in_gcs():
             ("chk_1", doc_id, "TEXT", "Content", 1, None, None, VALID_VEC),
         ],
         "SolutionCards": [("card_1", sidecar_uri)],
-        "EvidenceLinks": [("evl_1",)],
+        "SolutionImplementsDoc": [("card_1", doc_id)],
+        "EvidenceLinks": [("evl_1", "card_1", "chk_1", doc_id, 1, None, "Content")],
     }
 
     mock_db = MockSpannerDb(spanner_state)
@@ -639,4 +698,360 @@ def test_cli_report_formatter():
     assert "Eligible Text Chunks:    5" in report
     assert "Excluded IMAGE Chunks:   2" in report
     assert "Projected Total:         14 mutations" in report
+
+
+# ============================================================================
+# 6. AUDIT REGRESSION TESTS (CHECKPOINT, RECOVERY, EVIDENCELINKS)
+# ============================================================================
+
+
+def test_checkpoint_fails_when_solution_implements_doc_missing():
+    """Verify Point 3 fails when a SolutionCard lacks a SolutionImplementsDoc edge."""
+    doc_id = "doc_missing_implements_doc"
+    sidecar_data = build_valid_sidecar_json(doc_id, ["card_1"], ["chk_1"])
+    sidecar_hash = hashlib.sha256(sidecar_data).hexdigest()
+    sidecar_uri = f"gs://sales-discovery-mvp-mumbai/metadata/{doc_id}.meta.json"
+
+    mock_storage = MockStorageClient()
+    bucket = mock_storage.bucket("sales-discovery-mvp-mumbai")
+    bucket.blob(f"metadata/{doc_id}.meta.json").upload_from_string(sidecar_data)
+
+    spanner_state = {
+        "Documents": [(doc_id, "ENRICHED")],
+        "EvidenceChunks": [("chk_1", doc_id, "TEXT", "Content 1", 1, None, None, VALID_VEC)],
+        "SolutionCards": [("card_1", f"{sidecar_uri}#sha256:{sidecar_hash}")],
+        "SolutionImplementsDoc": [],  # Missing edge!
+        "EvidenceLinks": [("evl_card_1_chk_1", "card_1", "chk_1", doc_id, 1, None, "Quote for card_1")],
+    }
+
+    orchestrator = EnrichmentOrchestrator(
+        spanner_database=MockSpannerDb(spanner_state),
+        storage_client=mock_storage,
+    )
+
+    passed, details = orchestrator.check_completion_checkpoint(doc_id)
+    assert passed is False
+    assert details["solution_implements_doc_complete"] is False
+    assert "card_1" in details["missing_implements_doc_cards"]
+    assert details["all_points_passed"] is False
+
+
+def test_checkpoint_fails_when_multiple_cards_have_missing_edges():
+    """Verify Point 3 fails and reports missing card when one of multiple cards lacks SolutionImplementsDoc."""
+    doc_id = "doc_multi_missing_edges"
+    cards = ["card_1", "card_2"]
+    chunks = ["chk_1", "chk_2"]
+    sidecar_data = build_valid_sidecar_json(doc_id, cards, chunks)
+    sidecar_hash = hashlib.sha256(sidecar_data).hexdigest()
+    sidecar_uri = f"gs://sales-discovery-mvp-mumbai/metadata/{doc_id}.meta.json"
+
+    mock_storage = MockStorageClient()
+    bucket = mock_storage.bucket("sales-discovery-mvp-mumbai")
+    bucket.blob(f"metadata/{doc_id}.meta.json").upload_from_string(sidecar_data)
+
+    spanner_state = {
+        "Documents": [(doc_id, "ENRICHED")],
+        "EvidenceChunks": [
+            ("chk_1", doc_id, "TEXT", "Content 1", 1, None, None, VALID_VEC),
+            ("chk_2", doc_id, "TEXT", "Content 2", 2, None, None, VALID_VEC),
+        ],
+        "SolutionCards": [
+            ("card_1", f"{sidecar_uri}#sha256:{sidecar_hash}"),
+            ("card_2", f"{sidecar_uri}#sha256:{sidecar_hash}"),
+        ],
+        "SolutionImplementsDoc": [("card_1", doc_id)],  # card_2 missing!
+        "EvidenceLinks": [
+            ("evl_card_1_chk_1", "card_1", "chk_1", doc_id, 1, None, "Quote for card_1"),
+            ("evl_card_2_chk_2", "card_2", "chk_2", doc_id, 2, None, "Quote for card_2"),
+        ],
+    }
+
+    orchestrator = EnrichmentOrchestrator(
+        spanner_database=MockSpannerDb(spanner_state),
+        storage_client=mock_storage,
+    )
+
+    passed, details = orchestrator.check_completion_checkpoint(doc_id)
+    assert passed is False
+    assert details["solution_implements_doc_complete"] is False
+    assert details["missing_implements_doc_cards"] == ["card_2"]
+    assert details["all_points_passed"] is False
+
+
+def test_rerun_recovery_when_spanner_committed_and_promotion_failed():
+    """Verify rerun detects committed Spanner state, verifies staging sidecar, promotes it, and succeeds with 0 model calls."""
+    doc_id = "doc_recovery_success"
+    sidecar_data = build_valid_sidecar_json(doc_id, ["card_1"], ["chk_1"])
+    sidecar_hash = hashlib.sha256(sidecar_data).hexdigest()
+    sidecar_uri = f"gs://sales-discovery-mvp-mumbai/metadata/{doc_id}.meta.json"
+
+    # Staging blob exists, canonical blob does NOT exist
+    mock_storage = MockStorageClient()
+    bucket = mock_storage.bucket("sales-discovery-mvp-mumbai")
+    staging_blob = bucket.blob(f"metadata/staging/{doc_id}.meta.json.tmp")
+    staging_blob.upload_from_string(sidecar_data)
+
+    spanner_state = {
+        "Documents": [(doc_id, "ENRICHED")],
+        "EvidenceChunks": [("chk_1", doc_id, "TEXT", "Content 1", 1, None, None, VALID_VEC)],
+        "SolutionCards": [("card_1", f"{sidecar_uri}#sha256:{sidecar_hash}")],
+        "SolutionImplementsDoc": [("card_1", doc_id)],
+        "EvidenceLinks": [("evl_card_1_chk_1", "card_1", "chk_1", doc_id, 1, None, "Quote for card_1")],
+    }
+
+    mock_db = MockSpannerDb(spanner_state)
+    mock_embeddings = MagicMock(spec=VertexEmbeddingsClient)
+    mock_extractor = MagicMock(spec=MetadataExtractor)
+    mock_writer = MagicMock(spec=EnrichmentWriter)
+
+    orchestrator = EnrichmentOrchestrator(
+        spanner_database=mock_db,
+        storage_client=mock_storage,
+        embeddings_client=mock_embeddings,
+        metadata_extractor=mock_extractor,
+        enrichment_writer=mock_writer,
+    )
+
+    # Before run: canonical does not exist, staging exists
+    canonical_blob = bucket.blob(f"metadata/{doc_id}.meta.json")
+    assert canonical_blob.exists() is False
+    assert staging_blob.exists() is True
+
+    result = orchestrator.run(doc_id, dry_run=False, force_recompute=False)
+
+    assert result.status == EnrichmentStatus.SUCCESS
+    assert result.stage == EnrichmentStage.COMPLETED
+    assert result.sidecar_sha256 == sidecar_hash
+
+    # Canonical now promoted, staging cleaned up
+    assert canonical_blob.exists() is True
+    assert staging_blob.exists() is False
+
+    # Zero model calls and zero Spanner mutations
+    mock_embeddings.embed_texts.assert_not_called()
+    mock_extractor.extract_from_document.assert_not_called()
+    mock_writer.persist_enrichment.assert_not_called()
+
+
+def test_recovery_makes_zero_gemini_and_vertex_calls():
+    """Verify recovery explicit verification makes 0 Gemini and 0 Vertex AI calls."""
+    doc_id = "doc_recovery_zero_calls"
+    sidecar_data = build_valid_sidecar_json(doc_id, ["card_1"], ["chk_1"])
+    sidecar_hash = hashlib.sha256(sidecar_data).hexdigest()
+    sidecar_uri = f"gs://sales-discovery-mvp-mumbai/metadata/{doc_id}.meta.json"
+
+    mock_storage = MockStorageClient()
+    bucket = mock_storage.bucket("sales-discovery-mvp-mumbai")
+    bucket.blob(f"metadata/staging/{doc_id}.meta.json.tmp").upload_from_string(sidecar_data)
+
+    spanner_state = {
+        "Documents": [(doc_id, "ENRICHED")],
+        "EvidenceChunks": [("chk_1", doc_id, "TEXT", "Content 1", 1, None, None, VALID_VEC)],
+        "SolutionCards": [("card_1", f"{sidecar_uri}#sha256:{sidecar_hash}")],
+        "SolutionImplementsDoc": [("card_1", doc_id)],
+        "EvidenceLinks": [("evl_card_1_chk_1", "card_1", "chk_1", doc_id, 1, None, "Quote for card_1")],
+    }
+
+    mock_embeddings = MagicMock(spec=VertexEmbeddingsClient)
+    mock_extractor = MagicMock(spec=MetadataExtractor)
+    mock_writer = MagicMock(spec=EnrichmentWriter)
+
+    orchestrator = EnrichmentOrchestrator(
+        spanner_database=MockSpannerDb(spanner_state),
+        storage_client=mock_storage,
+        embeddings_client=mock_embeddings,
+        metadata_extractor=mock_extractor,
+        enrichment_writer=mock_writer,
+    )
+
+    recovered, reason, rec_result = orchestrator.recover_staging_sidecar(doc_id)
+    assert recovered is True
+    assert rec_result is not None
+    assert rec_result.status == EnrichmentStatus.SUCCESS
+    assert rec_result.embeddings_generated_count == 0
+
+    mock_embeddings.embed_texts.assert_not_called()
+    mock_extractor.extract_from_document.assert_not_called()
+    mock_writer.persist_enrichment.assert_not_called()
+
+
+def test_recovery_handles_missing_or_corrupt_staging_sidecar():
+    """Verify recovery safely fails and never marks document complete if staging is missing or corrupt."""
+    doc_id = "doc_recovery_corrupt"
+    valid_hash = "f" * 64
+    sidecar_uri = f"gs://sales-discovery-mvp-mumbai/metadata/{doc_id}.meta.json"
+
+    mock_storage = MockStorageClient()
+    bucket = mock_storage.bucket("sales-discovery-mvp-mumbai")
+
+    spanner_state = {
+        "Documents": [(doc_id, "ENRICHED")],
+        "EvidenceChunks": [("chk_1", doc_id, "TEXT", "Content 1", 1, None, None, VALID_VEC)],
+        "SolutionCards": [("card_1", f"{sidecar_uri}#sha256:{valid_hash}")],
+        "SolutionImplementsDoc": [("card_1", doc_id)],
+        "EvidenceLinks": [("evl_card_1_chk_1", "card_1", "chk_1", doc_id, 1, None, "Quote for card_1")],
+    }
+
+    orchestrator = EnrichmentOrchestrator(
+        spanner_database=MockSpannerDb(spanner_state),
+        storage_client=mock_storage,
+    )
+
+    # Subcase A: Staging blob missing
+    recovered, reason, rec_result = orchestrator.recover_staging_sidecar(doc_id)
+    assert recovered is False
+    assert "missing" in reason.lower()
+    assert rec_result is None
+    passed, details = orchestrator.check_completion_checkpoint(doc_id)
+    assert passed is False
+    assert details["can_recover_from_staging"] is False
+    assert details["all_points_passed"] is False
+
+    # Subcase B: Staging blob corrupt (hash mismatch)
+    corrupt_data = b'{"corrupt": true}'
+    bucket.blob(f"metadata/staging/{doc_id}.meta.json.tmp").upload_from_string(corrupt_data)
+
+    recovered, reason, rec_result = orchestrator.recover_staging_sidecar(doc_id)
+    assert recovered is False
+    assert "mismatch" in reason.lower()
+    assert rec_result is None
+    passed, details = orchestrator.check_completion_checkpoint(doc_id)
+    assert passed is False
+    assert details["can_recover_from_staging"] is False
+    assert details["all_points_passed"] is False
+
+
+def test_checkpoint_fails_when_evidence_links_missing_for_citation():
+    """Verify checkpoint fails when provenance manifest declares citation missing from Spanner EvidenceLinks."""
+    doc_id = "doc_missing_evidence"
+    cards = ["card_1", "card_2"]
+    chunks = ["chk_1", "chk_2"]
+    sidecar_data = build_valid_sidecar_json(doc_id, cards, chunks)
+    sidecar_hash = hashlib.sha256(sidecar_data).hexdigest()
+    sidecar_uri = f"gs://sales-discovery-mvp-mumbai/metadata/{doc_id}.meta.json"
+
+    mock_storage = MockStorageClient()
+    bucket = mock_storage.bucket("sales-discovery-mvp-mumbai")
+    bucket.blob(f"metadata/{doc_id}.meta.json").upload_from_string(sidecar_data)
+
+    spanner_state = {
+        "Documents": [(doc_id, "ENRICHED")],
+        "EvidenceChunks": [
+            ("chk_1", doc_id, "TEXT", "Content 1", 1, None, None, VALID_VEC),
+            ("chk_2", doc_id, "TEXT", "Content 2", 2, None, None, VALID_VEC),
+        ],
+        "SolutionCards": [
+            ("card_1", f"{sidecar_uri}#sha256:{sidecar_hash}"),
+            ("card_2", f"{sidecar_uri}#sha256:{sidecar_hash}"),
+        ],
+        "SolutionImplementsDoc": [("card_1", doc_id), ("card_2", doc_id)],
+        # Only card_1 has EvidenceLink; card_2 is missing!
+        "EvidenceLinks": [("evl_card_1_chk_1", "card_1", "chk_1", doc_id, 1, None, "Quote for card_1")],
+    }
+
+    orchestrator = EnrichmentOrchestrator(
+        spanner_database=MockSpannerDb(spanner_state),
+        storage_client=mock_storage,
+    )
+
+    passed, details = orchestrator.check_completion_checkpoint(doc_id)
+    assert passed is False
+    assert details["spanner_evidence_complete"] is False
+    assert "card_2" in details["missing_evidence_cards"]
+    assert details["all_points_passed"] is False
+
+
+def test_checkpoint_fails_when_multiple_cards_have_different_sidecar_hashes():
+    """Verify checkpoint fails when SolutionCards have divergent sidecar SHA-256 hashes."""
+    doc_id = "doc_divergent_hashes"
+    hash_1 = "1" * 64
+    hash_2 = "2" * 64
+    sidecar_uri = f"gs://sales-discovery-mvp-mumbai/metadata/{doc_id}.meta.json"
+
+    mock_storage = MockStorageClient()
+    spanner_state = {
+        "Documents": [(doc_id, "ENRICHED")],
+        "EvidenceChunks": [
+            ("chk_1", doc_id, "TEXT", "Content 1", 1, None, None, VALID_VEC),
+            ("chk_2", doc_id, "TEXT", "Content 2", 2, None, None, VALID_VEC),
+        ],
+        "SolutionCards": [
+            ("card_1", f"{sidecar_uri}#sha256:{hash_1}"),
+            ("card_2", f"{sidecar_uri}#sha256:{hash_2}"),  # Divergent hash!
+        ],
+        "SolutionImplementsDoc": [("card_1", doc_id), ("card_2", doc_id)],
+        "EvidenceLinks": [
+            ("evl_card_1_chk_1", "card_1", "chk_1", doc_id, 1, None, "Quote 1"),
+            ("evl_card_2_chk_2", "card_2", "chk_2", doc_id, 2, None, "Quote 2"),
+        ],
+    }
+
+    orchestrator = EnrichmentOrchestrator(
+        spanner_database=MockSpannerDb(spanner_state),
+        storage_client=mock_storage,
+    )
+
+    passed, details = orchestrator.check_completion_checkpoint(doc_id)
+    assert passed is False
+    assert details["all_cards_okf_valid"] is False
+    assert len(details["mismatched_card_uris"]) > 0
+    assert details["all_points_passed"] is False
+
+
+def test_fully_complete_checkpoint_skips_all_model_calls_and_writes():
+    """Verify document meeting all enhanced criteria skips with 0 calls to Vertex AI, Gemini, or Spanner."""
+    doc_id = "doc_multi_card_complete"
+    cards = ["card_1", "card_2"]
+    chunks = ["chk_1", "chk_2"]
+    sidecar_data = build_valid_sidecar_json(doc_id, cards, chunks)
+    sidecar_hash = hashlib.sha256(sidecar_data).hexdigest()
+    sidecar_uri = f"gs://sales-discovery-mvp-mumbai/metadata/{doc_id}.meta.json"
+
+    mock_storage = MockStorageClient()
+    bucket = mock_storage.bucket("sales-discovery-mvp-mumbai")
+    bucket.blob(f"metadata/{doc_id}.meta.json").upload_from_string(sidecar_data)
+
+    spanner_state = {
+        "Documents": [(doc_id, "ENRICHED")],
+        "EvidenceChunks": [
+            ("chk_1", doc_id, "TEXT", "Content 1", 1, None, None, VALID_VEC),
+            ("chk_2", doc_id, "TEXT", "Content 2", 2, None, None, VALID_VEC),
+        ],
+        "SolutionCards": [
+            ("card_1", f"{sidecar_uri}#sha256:{sidecar_hash}"),
+            ("card_2", f"{sidecar_uri}#sha256:{sidecar_hash}"),
+        ],
+        "SolutionImplementsDoc": [("card_1", doc_id), ("card_2", doc_id)],
+        "EvidenceLinks": [
+            ("evl_card_1_chk_1", "card_1", "chk_1", doc_id, 1, None, "Quote for card_1"),
+            ("evl_card_2_chk_2", "card_2", "chk_2", doc_id, 2, None, "Quote for card_2"),
+        ],
+    }
+
+    mock_embeddings = MagicMock(spec=VertexEmbeddingsClient)
+    mock_extractor = MagicMock(spec=MetadataExtractor)
+    mock_writer = MagicMock(spec=EnrichmentWriter)
+
+    orchestrator = EnrichmentOrchestrator(
+        spanner_database=MockSpannerDb(spanner_state),
+        storage_client=mock_storage,
+        embeddings_client=mock_embeddings,
+        metadata_extractor=mock_extractor,
+        enrichment_writer=mock_writer,
+    )
+
+    result = orchestrator.run(doc_id, dry_run=False, force_recompute=False)
+
+    assert result.status == EnrichmentStatus.SKIPPED
+    assert result.stage == EnrichmentStage.COMPLETED
+    assert result.checkpoint_details["all_points_passed"] is True
+    assert result.checkpoint_details["solution_implements_doc_complete"] is True
+    assert result.checkpoint_details["all_cards_okf_valid"] is True
+    assert result.checkpoint_details["spanner_evidence_complete"] is True
+    assert result.checkpoint_details["citation_manifest_verified"] is True
+
+    # 0 model calls and 0 Spanner writes
+    mock_embeddings.embed_texts.assert_not_called()
+    mock_extractor.extract_from_document.assert_not_called()
+    mock_writer.persist_enrichment.assert_not_called()
 

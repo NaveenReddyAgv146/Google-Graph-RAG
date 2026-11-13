@@ -37,6 +37,7 @@ from common.database.enrichment_writer import (
     EnrichmentWriteResult,
     EnrichmentWriter,
     format_okf_uri,
+    generate_evidence_link_id,
 )
 from common.embeddings.vertex_client import VertexEmbeddingsClient
 from common.models.schema import ChunkNode
@@ -175,7 +176,7 @@ class EnrichmentOrchestrator:
 
         try:
             # ----------------------------------------------------------------
-            # STAGE 1: CHECKPOINT
+            # STAGE 1: CHECKPOINT & RECOVERY
             # ----------------------------------------------------------------
             is_complete, cp_details = self.check_completion_checkpoint(clean_doc_id)
             if is_complete and not force_recompute and not dry_run:
@@ -201,6 +202,32 @@ class EnrichmentOrchestrator:
                     sidecar_sha256=cp_details.get("sidecar_sha256"),
                     checkpoint_details=cp_details,
                 )
+
+            # Check for staged promotion recovery before any model calls
+            if not force_recompute and not dry_run:
+                recovered, reason, rec_result = self.recover_staging_sidecar(clean_doc_id)
+                if recovered and rec_result is not None:
+                    duration_ms = (time.monotonic() - start_time) * 1000.0
+                    return EnrichmentOrchestratorResult(
+                        document_id=rec_result.document_id,
+                        status=rec_result.status,
+                        stage=rec_result.stage,
+                        dry_run=False,
+                        duration_ms=duration_ms,
+                        eligible_chunks_count=rec_result.eligible_chunks_count,
+                        excluded_image_chunks_count=rec_result.excluded_image_chunks_count,
+                        embeddings_generated_count=0,
+                        entities_count=rec_result.entities_count,
+                        technologies_count=rec_result.technologies_count,
+                        unresolved_technologies_count=0,
+                        solution_cards_count=rec_result.solution_cards_count,
+                        relationships_count=0,
+                        evidence_links_count=rec_result.evidence_links_count,
+                        projected_mutations=0,
+                        sidecar_uri=rec_result.sidecar_uri,
+                        sidecar_sha256=rec_result.sidecar_sha256,
+                        checkpoint_details=rec_result.checkpoint_details,
+                    )
 
             # ----------------------------------------------------------------
             # STAGE 2: DISCOVERY (READ CHUNKS FROM SPANNER, NEVER RE-INGEST)
@@ -409,14 +436,145 @@ class EnrichmentOrchestrator:
                 error_message=str(exc),
             )
 
+    def recover_staging_sidecar(
+        self, document_id: str
+    ) -> tuple[bool, str, EnrichmentOrchestratorResult | None]:
+        """Recover a committed Spanner enrichment where canonical sidecar promotion failed.
+
+        Detects committed Spanner state, verifies the retained staging sidecar against
+        the committed SHA-256 and citation manifest, promotes it to canonical, cleans staging,
+        and returns SUCCESS without any Gemini or Vertex AI model calls.
+        """
+        clean_doc_id = document_id.strip()
+        is_complete, cp_details = self.check_completion_checkpoint(clean_doc_id)
+        if is_complete:
+            return True, "Document already fully complete", None
+
+        # Detect committed Spanner enrichment
+        spanner_committed = (
+            cp_details.get("status_enriched", False)
+            and cp_details.get("eligible_chunks", 0) > 0
+            and cp_details.get("eligible_chunks") == cp_details.get("embedded_chunks")
+            and cp_details.get("solution_cards_count", 0) > 0
+            and cp_details.get("solution_implements_doc_complete", False)
+            and cp_details.get("all_cards_okf_valid", False)
+            and cp_details.get("spanner_evidence_complete", False)
+        )
+
+        if not spanner_committed:
+            return False, "Spanner enrichment not committed", None
+
+        expected_hash = cp_details.get("sidecar_sha256")
+        canonical_uri = cp_details.get("sidecar_uri")
+        if not expected_hash or not canonical_uri:
+            return False, "Missing expected sidecar SHA-256 or URI", None
+
+        bucket_name = (
+            canonical_uri[5:].split("/", 1)[0]
+            if canonical_uri.startswith("gs://")
+            else self.settings.gcs_mumbai_bucket
+        )
+        staging_blob_name = f"metadata/staging/{clean_doc_id}.meta.json.tmp"
+        canonical_blob_name = f"metadata/{clean_doc_id}.meta.json"
+        staging_uri = f"gs://{bucket_name}/{staging_blob_name}"
+
+        # 1. Verify retained staging sidecar against committed SHA-256
+        stg_exists, stg_hash, stg_content = self._fetch_and_verify_gcs_blob(staging_uri)
+        if not stg_exists or not stg_content:
+            logger.warning(
+                "Staging recovery aborted for '%s': retained staging sidecar '%s' does not exist",
+                clean_doc_id,
+                staging_uri,
+            )
+            return False, "Retained staging sidecar missing", None
+
+        if stg_hash != expected_hash:
+            logger.warning(
+                "Staging recovery aborted for '%s': staging hash '%s' does not match committed hash '%s'",
+                clean_doc_id,
+                stg_hash,
+                expected_hash,
+            )
+            return False, "Retained staging sidecar hash mismatch", None
+
+        # 2. Verify citation manifest in staging against Spanner EvidenceLinks
+        try:
+            staging_data = json.loads(stg_content.decode("utf-8"))
+            citations = self._extract_manifest_citations(staging_data)
+            ev_rows = cp_details.get("evidence_link_rows", [])
+            cit_ok, cit_err = self._verify_citations_against_spanner(citations, ev_rows)
+            if not cit_ok:
+                logger.warning(
+                    "Staging recovery aborted for '%s': citation verification failed: %s",
+                    clean_doc_id,
+                    cit_err,
+                )
+                return False, f"Citation verification failed: {cit_err}", None
+        except Exception as exc:
+            logger.warning(
+                "Staging recovery aborted for '%s': invalid JSON in staging blob: %s",
+                clean_doc_id,
+                exc,
+            )
+            return False, f"Invalid staging JSON: {exc}", None
+
+        # 3. Promote staging sidecar to canonical
+        self._upload_gcs_blob(
+            bucket_name=bucket_name,
+            blob_name=canonical_blob_name,
+            content=stg_content,
+            content_type="application/json",
+            metadata={"sha256": expected_hash},
+        )
+
+        # 4. Verify canonical object exists and matches expected hash
+        can_exists, can_hash = self._verify_gcs_sidecar(canonical_uri)
+        if not can_exists or can_hash != expected_hash:
+            logger.error(
+                "Staging recovery failed for '%s': canonical object verification failed after promotion",
+                clean_doc_id,
+            )
+            return False, "Canonical promotion verification failed", None
+
+        # 5. Clean staging blob
+        self._delete_gcs_blob_if_exists(bucket_name, staging_blob_name)
+
+        logger.info(
+            "Successfully recovered document '%s' from retained staging sidecar (SHA-256=%s). Zero model calls.",
+            clean_doc_id,
+            expected_hash,
+        )
+
+        result = EnrichmentOrchestratorResult(
+            document_id=clean_doc_id,
+            status=EnrichmentStatus.SUCCESS,
+            stage=EnrichmentStage.COMPLETED,
+            dry_run=False,
+            duration_ms=0.0,
+            eligible_chunks_count=cp_details.get("eligible_chunks", 0),
+            excluded_image_chunks_count=cp_details.get("image_chunks", 0),
+            embeddings_generated_count=0,
+            entities_count=cp_details.get("entities_count", 0),
+            technologies_count=cp_details.get("technologies_count", 0),
+            unresolved_technologies_count=0,
+            solution_cards_count=cp_details.get("solution_cards_count", 0),
+            relationships_count=0,
+            evidence_links_count=cp_details.get("evidence_links_count", 0),
+            projected_mutations=0,
+            sidecar_uri=canonical_uri,
+            sidecar_sha256=expected_hash,
+            checkpoint_details=cp_details,
+        )
+        return True, "Recovered from staging sidecar", result
+
     def check_completion_checkpoint(self, document_id: str) -> tuple[bool, dict[str, Any]]:
         """Validate the four-point completion checkpoint for a document.
 
         Points:
         1. Documents.Status == 'ENRICHED'
         2. All eligible non-empty chunks have 768-dim Embedding768.
-        3. SolutionCards and EvidenceLinks exist.
-        4. GCS sidecar exists and content SHA-256 matches SolutionCards.OkfUri reference.
+        3. SolutionCards have matching SolutionImplementsDoc edges and complete EvidenceLinks.
+        4. GCS canonical sidecar exists, SHA-256 matches all cards' OkfUri, and citation manifest matches Spanner.
         """
         details: dict[str, Any] = {
             "document_exists": False,
@@ -425,11 +583,22 @@ class EnrichmentOrchestrator:
             "embedded_chunks": 0,
             "image_chunks": 0,
             "solution_cards_count": 0,
+            "solution_implements_doc_complete": False,
+            "missing_implements_doc_cards": [],
+            "all_cards_okf_valid": False,
+            "mismatched_card_uris": [],
             "evidence_links_count": 0,
+            "evidence_link_rows": [],
+            "spanner_evidence_complete": False,
+            "missing_evidence_cards": [],
             "sidecar_uri": None,
             "sidecar_sha256": None,
             "sidecar_gcs_exists": False,
             "sidecar_sha256_match": False,
+            "citation_manifest_verified": False,
+            "can_recover_from_staging": False,
+            "staging_uri": None,
+            "staging_sha256": None,
             "all_points_passed": False,
         }
 
@@ -465,6 +634,7 @@ class EnrichmentOrchestrator:
                     )
                 )
 
+                all_doc_chunk_ids = {r[0] for r in chunk_rows}
                 eligible_count = 0
                 embedded_count = 0
                 image_count = 0
@@ -482,7 +652,7 @@ class EnrichmentOrchestrator:
                 details["image_chunks"] = image_count
                 chunks_complete = (eligible_count > 0 and eligible_count == embedded_count)
 
-                # Point 3: SolutionCards and EvidenceLinks
+                # Point 3a: SolutionCards & SolutionImplementsDoc edges
                 cards_sql = """
                 SELECT CardId, OkfUri FROM SolutionCards WHERE DocumentId = @doc_id
                 """
@@ -495,37 +665,149 @@ class EnrichmentOrchestrator:
                 )
                 details["solution_cards_count"] = len(card_rows)
 
-                ev_sql = "SELECT COUNT(1) FROM EvidenceLinks WHERE DocumentId = @doc_id"
-                ev_count = list(
+                if not card_rows:
+                    return False, details
+
+                card_ids = [r[0] for r in card_rows]
+
+                sid_sql = """
+                SELECT CardId, DocumentId FROM SolutionImplementsDoc WHERE DocumentId = @doc_id
+                """
+                sid_rows = list(
+                    snapshot.execute_sql(
+                        sid_sql,
+                        params={"doc_id": document_id},
+                        param_types={"doc_id": spanner.param_types.STRING},
+                    )
+                )
+                sid_card_ids = {r[0] for r in sid_rows}
+                missing_sid = [cid for cid in card_ids if cid not in sid_card_ids]
+                details["missing_implements_doc_cards"] = missing_sid
+                details["solution_implements_doc_complete"] = (len(missing_sid) == 0)
+
+                # Point 3b: Validate EVERY SolutionCard OkfUri and SHA-256
+                all_cards_okf_valid = True
+                mismatched_uris: list[str] = []
+                canonical_uri: str | None = None
+                expected_hash: str | None = None
+
+                for cid, uri in card_rows:
+                    if not uri or "#sha256:" not in uri:
+                        all_cards_okf_valid = False
+                        mismatched_uris.append(f"{cid}: invalid_uri={uri}")
+                        continue
+                    u_part, s_hash = uri.split("#sha256:", 1)
+                    if len(s_hash) != 64:
+                        all_cards_okf_valid = False
+                        mismatched_uris.append(f"{cid}: bad_sha_len={len(s_hash)}")
+                        continue
+                    if canonical_uri is None:
+                        canonical_uri = u_part
+                        expected_hash = s_hash
+                    else:
+                        if u_part != canonical_uri or s_hash != expected_hash:
+                            all_cards_okf_valid = False
+                            mismatched_uris.append(f"{cid}: uri/hash mismatch ({u_part} vs {canonical_uri})")
+
+                details["all_cards_okf_valid"] = (all_cards_okf_valid and canonical_uri is not None and expected_hash is not None)
+                details["mismatched_card_uris"] = mismatched_uris
+                details["sidecar_uri"] = canonical_uri
+                details["sidecar_sha256"] = expected_hash
+
+                # Point 3c: EvidenceLinks Relationships & Completeness
+                ev_sql = """
+                SELECT EvidenceId, CardId, ChunkId, Note FROM EvidenceLinks WHERE DocumentId = @doc_id
+                """
+                ev_rows = list(
                     snapshot.execute_sql(
                         ev_sql,
                         params={"doc_id": document_id},
                         param_types={"doc_id": spanner.param_types.STRING},
                     )
-                )[0][0]
-                details["evidence_links_count"] = ev_count
-                metadata_present = (len(card_rows) > 0 and ev_count > 0)
+                )
+                details["evidence_links_count"] = len(ev_rows)
+                details["evidence_link_rows"] = ev_rows
 
-                # Point 4: GCS Sidecar SHA-256 match
+                cards_with_evidence = {r[1] for r in ev_rows if len(r) > 1 and r[1]}
+                missing_ev_cards = [cid for cid in card_ids if cid not in cards_with_evidence]
+                invalid_ev_chunks = [r[0] for r in ev_rows if len(r) <= 2 or not r[2] or r[2] not in all_doc_chunk_ids]
+                invalid_ev_ids = [r[0] for r in ev_rows if not r[0] or not str(r[0]).startswith("evl_")]
+
+                spanner_ev_complete = (
+                    len(ev_rows) >= len(card_ids)
+                    and len(missing_ev_cards) == 0
+                    and len(invalid_ev_chunks) == 0
+                    and len(invalid_ev_ids) == 0
+                )
+                details["spanner_evidence_complete"] = spanner_ev_complete
+                details["missing_evidence_cards"] = missing_ev_cards
+
+                # Point 4: Canonical GCS Sidecar SHA-256 & Provenance Manifest Verification
                 sidecar_ok = False
-                if card_rows and card_rows[0][1]:
-                    okf_uri = card_rows[0][1]
-                    details["sidecar_uri"] = okf_uri
-                    if "#sha256:" in okf_uri:
-                        uri_part, expected_hash = okf_uri.split("#sha256:", 1)
-                        details["sidecar_sha256"] = expected_hash
-                        # Check GCS sidecar existence & hash
-                        gcs_exists, actual_hash = self._verify_gcs_sidecar(uri_part)
-                        details["sidecar_gcs_exists"] = gcs_exists
-                        if gcs_exists and actual_hash == expected_hash:
-                            details["sidecar_sha256_match"] = True
-                            sidecar_ok = True
+                sidecar_content: bytes | None = None
+
+                if canonical_uri and expected_hash and details["all_cards_okf_valid"]:
+                    gcs_exists, actual_hash, sidecar_content = self._fetch_and_verify_gcs_blob(canonical_uri)
+                    details["sidecar_gcs_exists"] = gcs_exists
+                    if gcs_exists and actual_hash == expected_hash and sidecar_content:
+                        details["sidecar_sha256_match"] = True
+                        try:
+                            manifest_data = json.loads(sidecar_content.decode("utf-8"))
+                            manifest_citations = self._extract_manifest_citations(manifest_data)
+                            cit_ok, cit_err = self._verify_citations_against_spanner(manifest_citations, ev_rows)
+                            details["citation_manifest_verified"] = cit_ok
+                            if cit_ok:
+                                sidecar_ok = True
+                            else:
+                                logger.warning(
+                                    "Canonical sidecar citation verification failed for '%s': %s",
+                                    document_id,
+                                    cit_err,
+                                )
+                        except Exception as json_err:
+                            logger.warning("Canonical sidecar JSON parse error for '%s': %s", document_id, json_err)
+                            details["citation_manifest_verified"] = False
+
+                # Check Staging Sidecar for Recovery (if canonical is not yet valid)
+                if (
+                    not sidecar_ok
+                    and details["status_enriched"]
+                    and chunks_complete
+                    and details["solution_implements_doc_complete"]
+                    and details["all_cards_okf_valid"]
+                    and spanner_ev_complete
+                    and expected_hash
+                    and canonical_uri
+                ):
+                    bucket_name = (
+                        canonical_uri[5:].split("/", 1)[0]
+                        if canonical_uri.startswith("gs://")
+                        else self.settings.gcs_mumbai_bucket
+                    )
+                    staging_blob_name = f"metadata/staging/{document_id}.meta.json.tmp"
+                    staging_uri = f"gs://{bucket_name}/{staging_blob_name}"
+                    details["staging_uri"] = staging_uri
+
+                    stg_exists, stg_hash, stg_content = self._fetch_and_verify_gcs_blob(staging_uri)
+                    if stg_exists and stg_hash == expected_hash and stg_content:
+                        try:
+                            stg_manifest = json.loads(stg_content.decode("utf-8"))
+                            stg_citations = self._extract_manifest_citations(stg_manifest)
+                            cit_ok, _ = self._verify_citations_against_spanner(stg_citations, ev_rows)
+                            if cit_ok:
+                                details["can_recover_from_staging"] = True
+                                details["staging_sha256"] = stg_hash
+                        except Exception:
+                            details["can_recover_from_staging"] = False
 
                 all_passed = (
                     details["status_enriched"]
                     and chunks_complete
-                    and metadata_present
+                    and details["solution_implements_doc_complete"]
+                    and details["all_cards_okf_valid"]
+                    and details["spanner_evidence_complete"]
                     and sidecar_ok
+                    and details.get("citation_manifest_verified", False)
                 )
                 details["all_points_passed"] = all_passed
                 return all_passed, details
@@ -533,6 +815,67 @@ class EnrichmentOrchestrator:
         except Exception as e:
             logger.warning("Checkpoint inspection failed for '%s': %s", document_id, e)
             return False, details
+
+    def _extract_manifest_citations(self, manifest_data: dict[str, Any]) -> list[dict[str, str]]:
+        """Extract expected citation references from the provenance manifest dictionary."""
+        if "citations" in manifest_data and isinstance(manifest_data["citations"], list):
+            return manifest_data["citations"]
+
+        citations: list[dict[str, str]] = []
+        for c in manifest_data.get("solution_cards", []):
+            cid = c.get("card_id", "")
+            chunk_id = c.get("chunk_id", "none")
+            quote = c.get("evidence_quote", "")
+            ev_id = generate_evidence_link_id(cid, chunk_id, quote)
+            citations.append({
+                "evidence_id": ev_id,
+                "card_id": cid,
+                "chunk_id": chunk_id,
+                "evidence_quote": quote,
+            })
+        return citations
+
+    def _verify_citations_against_spanner(
+        self,
+        manifest_citations: list[dict[str, str]],
+        ev_rows: list[tuple],
+    ) -> tuple[bool, str | None]:
+        """Verify that all citations in the manifest match Spanner EvidenceLinks."""
+        if not manifest_citations:
+            return True, None
+
+        spanner_by_id: dict[str, tuple[str | None, str | None]] = {}
+        spanner_pairs: set[tuple[str | None, str | None]] = set()
+
+        for r in ev_rows:
+            ev_id = r[0] if len(r) > 0 else None
+            card_id = r[1] if len(r) > 1 else None
+            chunk_id = r[2] if len(r) > 2 else None
+            if ev_id:
+                spanner_by_id[ev_id] = (card_id, chunk_id)
+            if card_id and chunk_id:
+                spanner_pairs.add((card_id, chunk_id))
+
+        for citation in manifest_citations:
+            ev_id = citation.get("evidence_id")
+            card_id = citation.get("card_id")
+            chunk_id = citation.get("chunk_id")
+
+            if ev_id and ev_id in spanner_by_id:
+                s_card, s_chunk = spanner_by_id[ev_id]
+                if card_id and s_card != card_id:
+                    return False, f"EvidenceId '{ev_id}' linked to CardId '{s_card}', expected '{card_id}'"
+                if chunk_id and s_chunk != chunk_id:
+                    return False, f"EvidenceId '{ev_id}' linked to ChunkId '{s_chunk}', expected '{chunk_id}'"
+            elif (card_id, chunk_id) in spanner_pairs:
+                continue
+            else:
+                return (
+                    False,
+                    f"Expected citation (EvidenceId='{ev_id}', CardId='{card_id}', ChunkId='{chunk_id}') not found in Spanner EvidenceLinks",
+                )
+
+        return True, None
 
     def _read_document_chunks(self, document_id: str) -> dict[str, list[ChunkNode]]:
         """Read existing EvidenceChunks from Spanner and partition into eligible vs excluded."""
@@ -580,6 +923,19 @@ class EnrichmentOrchestrator:
         eligible_chunks_count: int,
     ) -> bytes:
         """Construct the canonical JSON payload for the .meta.json sidecar."""
+        citations = []
+        for c in metadata.solution_cards:
+            cid = c.card_id
+            chunk_id = getattr(c, "chunk_id", None) or "none"
+            quote = getattr(c, "evidence_quote", None) or ""
+            ev_id = generate_evidence_link_id(cid, chunk_id, quote)
+            citations.append({
+                "evidence_id": ev_id,
+                "card_id": cid,
+                "chunk_id": chunk_id,
+                "evidence_quote": quote,
+            })
+
         data = {
             "document_id": document_id,
             "enriched_at": datetime.now(timezone.utc).isoformat(),
@@ -636,27 +992,33 @@ class EnrichmentOrchestrator:
                 }
                 for r in metadata.relationships
             ],
+            "citations": citations,
         }
         return json.dumps(data, indent=2, sort_keys=True).encode("utf-8")
 
-    def _verify_gcs_sidecar(self, gcs_uri: str) -> tuple[bool, str | None]:
-        """Verify that a GCS sidecar blob exists and compute its SHA-256 hash."""
+    def _fetch_and_verify_gcs_blob(self, gcs_uri: str) -> tuple[bool, str | None, bytes | None]:
+        """Fetch GCS blob content and compute its SHA-256 hash."""
         try:
             if not gcs_uri.startswith("gs://"):
-                return False, None
+                return False, None, None
             path_part = gcs_uri[5:]
             bucket_name, blob_name = path_part.split("/", 1)
             bucket = self.storage_client.bucket(bucket_name)
             blob = bucket.blob(blob_name)
             if not blob.exists():
-                return False, None
+                return False, None, None
 
             content = blob.download_as_bytes()
             computed_hash = hashlib.sha256(content).hexdigest()
-            return True, computed_hash
+            return True, computed_hash, content
         except Exception as e:
-            logger.debug("Failed verifying GCS sidecar '%s': %s", gcs_uri, e)
-            return False, None
+            logger.debug("Failed fetching GCS sidecar '%s': %s", gcs_uri, e)
+            return False, None, None
+
+    def _verify_gcs_sidecar(self, gcs_uri: str) -> tuple[bool, str | None]:
+        """Verify that a GCS sidecar blob exists and compute its SHA-256 hash."""
+        exists, sha, _ = self._fetch_and_verify_gcs_blob(gcs_uri)
+        return exists, sha
 
     def _upload_gcs_blob(
         self,
@@ -759,8 +1121,11 @@ def format_enrichment_result_report(result: EnrichmentOrchestratorResult) -> str
             "--- Four-Point Completion Checkpoint Status ---",
             f"Point 1 (Document Status ENRICHED):    {cp.get('status_enriched', False)}",
             f"Point 2 (Chunks Embeddings Complete):  {cp.get('embedded_chunks', 0)} / {cp.get('eligible_chunks', 0)}",
-            f"Point 3 (Cards & EvidenceLinks Exist): {cp.get('solution_cards_count', 0)} cards, {cp.get('evidence_links_count', 0)} links",
-            f"Point 4 (GCS Sidecar & Hash Match):   {cp.get('sidecar_sha256_match', False)}",
+            f"Point 3a (SolutionImplementsDoc):     {cp.get('solution_implements_doc_complete', False)}",
+            f"Point 3b (All Cards OkfUri Valid):    {cp.get('all_cards_okf_valid', False)}",
+            f"Point 3c (EvidenceLinks Complete):     {cp.get('spanner_evidence_complete', False)}",
+            f"Point 4a (GCS Canonical Sidecar):     {cp.get('sidecar_gcs_exists', False)} (Hash Match: {cp.get('sidecar_sha256_match', False)})",
+            f"Point 4b (Citation Manifest Match):   {cp.get('citation_manifest_verified', False)}",
             f"All 4 Criteria Met:                   {cp.get('all_points_passed', False)}",
         ])
 
