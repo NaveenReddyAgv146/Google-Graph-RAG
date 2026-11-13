@@ -107,6 +107,8 @@ class EnrichmentOrchestratorResult:
     sidecar_sha256: str | None = None
     checkpoint_details: dict[str, Any] = field(default_factory=dict)
     error_message: str | None = None
+    metadata_result: ExtractedMetadataResult | None = None
+    projected_table_mutations: dict[str, int] = field(default_factory=dict)
 
 
 # ============================================================================
@@ -309,15 +311,29 @@ class EnrichmentOrchestrator:
             # ----------------------------------------------------------------
             if dry_run:
                 duration_ms = (time.monotonic() - start_time) * 1000.0
-                projected_mutations = (
-                    len(chunk_embeddings)
-                    + len(metadata_result.entities)
-                    + len(metadata_result.technologies)
-                    + len(metadata_result.solution_cards)
-                    + len(metadata_result.relationships)
-                    + len(metadata_result.solution_cards)  # EvidenceLinks & SID
-                    + 1  # Documents status
-                )
+
+                cre_count = sum(1 for e in metadata_result.entities if getattr(e, "chunk_id", None))
+                cmt_count = sum(1 for t in metadata_result.technologies if getattr(t, "chunk_id", None))
+                sst_count = sum(len(getattr(c, "technologies", [])) for c in metadata_result.solution_cards)
+                sid_count = len(metadata_result.solution_cards)
+                ere_count = len(metadata_result.relationships)
+                evl_count = len(metadata_result.solution_cards)
+
+                projected_table_mutations = {
+                    "EvidenceChunks": len(chunk_embeddings),
+                    "Entities": len(metadata_result.entities),
+                    "Technologies": len(metadata_result.technologies),
+                    "SolutionCards": len(metadata_result.solution_cards),
+                    "ChunkReferencesEntity": cre_count,
+                    "ChunkMentionsTech": cmt_count,
+                    "SolutionSupportsTech": sst_count,
+                    "SolutionImplementsDoc": sid_count,
+                    "EntityReferencesEntity": ere_count,
+                    "EvidenceLinks": evl_count,
+                    "Documents": 1,
+                }
+                projected_mutations = sum(projected_table_mutations.values())
+
                 logger.info(
                     "Dry-run simulation complete for '%s'. Zero writes committed to Spanner or GCS.",
                     clean_doc_id,
@@ -338,6 +354,8 @@ class EnrichmentOrchestrator:
                     relationships_count=len(metadata_result.relationships),
                     evidence_links_count=len(metadata_result.solution_cards),
                     projected_mutations=projected_mutations,
+                    metadata_result=metadata_result,
+                    projected_table_mutations=projected_table_mutations,
                     sidecar_uri=sidecar_uri,
                     sidecar_sha256=sidecar_sha256,
                     checkpoint_details=cp_details,
@@ -1109,10 +1127,59 @@ def format_enrichment_result_report(result: EnrichmentOrchestratorResult) -> str
     elif result.dry_run:
         lines.extend([
             "",
-            "--- Projected Spanner Mutations (Dry Run) ---",
-            f"Projected Total:         {result.projected_mutations} mutations",
+            "--- Projected Spanner Mutations (Dry Run Simulation) ---",
+            f"Projected Total:         {result.projected_mutations} mutations across 11 tables",
             "Actual Committed Writes: 0 mutations (Dry Run Enforced)",
         ])
+        if result.projected_table_mutations:
+            lines.append("")
+            lines.append("  Table-by-Table Projected Mutations:")
+            for tbl, cnt in result.projected_table_mutations.items():
+                lines.append(f"    - {tbl:<24}: {cnt} mutations")
+
+    if result.metadata_result:
+        mr = result.metadata_result
+        if mr.entities:
+            lines.extend([
+                "",
+                "--- Extracted Entities ---",
+            ])
+            for e in mr.entities:
+                lines.append(f"  * [{e.category}] {e.name} (Chunk: {e.chunk_id})")
+                lines.append(f"    Evidence: \"{e.evidence_quote}\"")
+
+        if mr.technologies:
+            lines.extend([
+                "",
+                "--- Resolved Technologies ---",
+            ])
+            for t in mr.technologies:
+                lines.append(f"  * {t.canonical_name} (TechId: {t.tech_id}, Category: {t.category}, Chunk: {t.chunk_id})")
+                lines.append(f"    Raw: \"{t.raw_name}\" | Evidence: \"{t.evidence_quote}\"")
+
+        if mr.solution_cards:
+            lines.extend([
+                "",
+                "--- Proposed SolutionCards ---",
+            ])
+            for sc in mr.solution_cards:
+                lines.append(f"  * CardId: {sc.card_id} | Project: {sc.project_name}")
+                lines.append(f"    Problem:     {sc.business_problem}")
+                lines.append(f"    Proposed:    {sc.proposed_solution}")
+                lines.append(f"    Implemented: {sc.implemented_solution}")
+                lines.append(f"    Outcome:     {sc.outcome}")
+                lines.append(f"    ChunkId:     {sc.chunk_id}")
+                lines.append(f"    Evidence:    \"{sc.evidence_quote}\"")
+                lines.append(f"    Technologies: {sc.technologies}")
+
+        if mr.relationships:
+            lines.extend([
+                "",
+                "--- Extracted Relationships ---",
+            ])
+            for r in mr.relationships:
+                lines.append(f"  * {r.source_name} --[{r.relationship_type}]--> {r.target_name} (Chunk: {r.chunk_id})")
+                lines.append(f"    Evidence: \"{r.evidence_quote}\"")
 
     if result.checkpoint_details:
         cp = result.checkpoint_details
