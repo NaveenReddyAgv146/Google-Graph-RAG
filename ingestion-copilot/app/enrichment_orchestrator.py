@@ -390,6 +390,12 @@ class EnrichmentOrchestrator:
                 content_type="application/json",
                 metadata={"sha256": sidecar_sha256},
             )
+            staging_uri = f"gs://{bucket_name}/{staging_blob_name}"
+            stg_exists, stg_hash = self._verify_gcs_sidecar(staging_uri)
+            if not stg_exists or stg_hash != sidecar_sha256:
+                raise RuntimeError(
+                    f"Staging sidecar verification failed for '{clean_doc_id}' at {staging_uri}"
+                )
 
             # ----------------------------------------------------------------
             # STAGE 6: PERSISTENCE (ATOMIC 11-TABLE SPANNER COMMIT)
@@ -418,6 +424,11 @@ class EnrichmentOrchestrator:
                 content_type="application/json",
                 metadata={"sha256": sidecar_sha256},
             )
+            can_exists, can_hash = self._verify_gcs_sidecar(sidecar_uri)
+            if not can_exists or can_hash != sidecar_sha256:
+                raise RuntimeError(
+                    f"Canonical sidecar verification failed for '{clean_doc_id}' at {sidecar_uri}"
+                )
             # Cleanup staging temporary blob
             self._delete_gcs_blob_if_exists(bucket_name, staging_blob_name)
 
