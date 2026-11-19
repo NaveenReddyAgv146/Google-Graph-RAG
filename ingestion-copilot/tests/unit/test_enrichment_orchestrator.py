@@ -1224,4 +1224,340 @@ def test_recovery_succeeds_with_mixed_legacy_and_canonical_cards():
     mock_writer.persist_enrichment.assert_not_called()
 
 
+def test_dry_run_projection_unresolved_technologies_contribute_zero():
+    """Regression Test: Verify unresolved technologies (is_canonical=False, tech_id=None) contribute ZERO mutations to Technologies and ChunkMentionsTech in dry-run projection."""
+    doc_id = "doc_dryrun_unresolved_techs"
+    spanner_state = {
+        "Documents": [(doc_id, "PARSED")],
+        "EvidenceChunks": [
+            ("chk_1", doc_id, "TEXT", "YouTube video encoding uses Flash Video.", 1, None, None),
+            ("chk_2", doc_id, "TEXT", "Broadband Internet enabled video streaming.", 2, None, None),
+        ],
+        "SolutionCards": [],
+        "EvidenceLinks": [],
+    }
+
+    mock_db = MockSpannerDb(spanner_state)
+    mock_storage = MockStorageClient()
+
+    mock_embeddings = MagicMock(spec=VertexEmbeddingsClient)
+    mock_embeddings.embed_texts.return_value = [VALID_VEC, VALID_VEC]
+
+    # 3 unresolved technologies with chunk references (like YouTube PDF document)
+    unresolved_techs = [
+        ValidatedTechnology(
+            raw_name="Flash Video",
+            chunk_id="chk_1",
+            evidence_quote="Flash Video",
+            tech_id=None,
+            canonical_name=None,
+            category=None,
+            is_canonical=False,
+            unresolved=True,
+        ),
+        ValidatedTechnology(
+            raw_name="Broadband Internet",
+            chunk_id="chk_2",
+            evidence_quote="Broadband Internet",
+            tech_id=None,
+            canonical_name=None,
+            category=None,
+            is_canonical=False,
+            unresolved=True,
+        ),
+        ValidatedTechnology(
+            raw_name="Digital video recording technology",
+            chunk_id="chk_2",
+            evidence_quote="Digital video recording technology",
+            tech_id=None,
+            canonical_name=None,
+            category=None,
+            is_canonical=False,
+            unresolved=True,
+        ),
+    ]
+
+    mock_metadata = ExtractedMetadataResult(
+        document_id=doc_id,
+        entities=[
+            ValidatedEntity(
+                name="YouTube",
+                category="ORGANIZATION",
+                description="Video platform",
+                chunk_id="chk_1",
+                evidence_quote="YouTube video encoding",
+                entity_id="ent_youtube",
+            )
+        ],
+        technologies=unresolved_techs,
+        solution_cards=[
+            ValidatedSolutionCard(
+                card_id="card_yt",
+                document_id=doc_id,
+                project_name="YouTube Platform",
+                business_problem="Video hosting",
+                proposed_solution="Flash video streaming",
+                implemented_solution="Encoding backend",
+                outcome="Massive growth",
+                chunk_id="chk_1",
+                evidence_quote="YouTube video encoding uses Flash Video.",
+                technologies=[],  # No canonical tech
+            )
+        ],
+        relationships=[
+            ValidatedEntityRelationship(
+                source_entity_id="ent_youtube",
+                target_entity_id="ent_youtube",
+                source_name="YouTube",
+                target_name="YouTube",
+                relationship_type="SELF",
+                chunk_id="chk_1",
+                evidence_quote="YouTube video encoding",
+            )
+        ],
+        unresolved_technologies=["Flash Video", "Broadband Internet", "Digital video recording technology"],
+        rejected_candidates=[],
+    )
+
+    mock_extractor = MagicMock(spec=MetadataExtractor)
+    mock_extractor.extract_from_document.return_value = mock_metadata
+    mock_writer = MagicMock(spec=EnrichmentWriter)
+
+    orchestrator = EnrichmentOrchestrator(
+        spanner_database=mock_db,
+        storage_client=mock_storage,
+        embeddings_client=mock_embeddings,
+        metadata_extractor=mock_extractor,
+        enrichment_writer=mock_writer,
+    )
+
+    result = orchestrator.run(doc_id, dry_run=True)
+
+    assert result.status == EnrichmentStatus.DRY_RUN
+    assert result.technologies_count == 0  # 0 canonical technologies
+    assert result.unresolved_technologies_count == 3
+    assert result.projected_table_mutations["Technologies"] == 0
+    assert result.projected_table_mutations["ChunkMentionsTech"] == 0
+    assert result.projected_table_mutations["EvidenceChunks"] == 2
+    assert result.projected_table_mutations["Entities"] == 1
+    assert result.projected_table_mutations["SolutionCards"] == 1
+    assert result.projected_table_mutations["ChunkReferencesEntity"] == 1
+    assert result.projected_table_mutations["SolutionSupportsTech"] == 0
+    assert result.projected_table_mutations["SolutionImplementsDoc"] == 1
+    assert result.projected_table_mutations["EntityReferencesEntity"] == 1
+    assert result.projected_table_mutations["EvidenceLinks"] == 1
+    assert result.projected_table_mutations["Documents"] == 1
+
+    # Total expected = 2 + 1 + 0 + 1 + 1 + 0 + 0 + 1 + 1 + 1 + 1 = 9 mutations
+    assert result.projected_mutations == 9
+
+
+def test_dry_run_projection_canonical_technologies_counted_correctly():
+    """Regression Test: Verify canonical technologies are counted accurately in Technologies and ChunkMentionsTech."""
+    doc_id = "doc_dryrun_canonical_techs"
+    spanner_state = {
+        "Documents": [(doc_id, "PARSED")],
+        "EvidenceChunks": [
+            ("chk_1", doc_id, "TEXT", "Migrated to Spanner and BigQuery.", 1, None, None),
+            ("chk_2", doc_id, "TEXT", "Spanner handles transactions.", 2, None, None),
+        ],
+        "SolutionCards": [],
+        "EvidenceLinks": [],
+    }
+
+    mock_db = MockSpannerDb(spanner_state)
+    mock_storage = MockStorageClient()
+
+    mock_embeddings = MagicMock(spec=VertexEmbeddingsClient)
+    mock_embeddings.embed_texts.return_value = [VALID_VEC, VALID_VEC]
+
+    # 2 unique canonical technologies across 3 chunk mentions
+    canonical_techs = [
+        ValidatedTechnology(
+            raw_name="Cloud Spanner",
+            chunk_id="chk_1",
+            evidence_quote="Migrated to Spanner",
+            tech_id="tech_spanner",
+            canonical_name="Cloud Spanner",
+            category="Database",
+            is_canonical=True,
+            unresolved=False,
+        ),
+        ValidatedTechnology(
+            raw_name="Cloud Spanner",
+            chunk_id="chk_2",
+            evidence_quote="Spanner handles transactions",
+            tech_id="tech_spanner",
+            canonical_name="Cloud Spanner",
+            category="Database",
+            is_canonical=True,
+            unresolved=False,
+        ),
+        ValidatedTechnology(
+            raw_name="BigQuery",
+            chunk_id="chk_1",
+            evidence_quote="and BigQuery",
+            tech_id="tech_bigquery",
+            canonical_name="BigQuery",
+            category="Analytics",
+            is_canonical=True,
+            unresolved=False,
+        ),
+    ]
+
+    mock_metadata = ExtractedMetadataResult(
+        document_id=doc_id,
+        entities=[],
+        technologies=canonical_techs,
+        solution_cards=[
+            ValidatedSolutionCard(
+                card_id="card_spanner",
+                document_id=doc_id,
+                project_name="Spanner Modernization",
+                business_problem="Scale",
+                proposed_solution="Spanner",
+                implemented_solution="Spanner",
+                outcome="Success",
+                chunk_id="chk_1",
+                evidence_quote="Migrated to Spanner and BigQuery.",
+                technologies=["tech_spanner", "tech_bigquery"],
+            )
+        ],
+        relationships=[],
+        unresolved_technologies=[],
+        rejected_candidates=[],
+    )
+
+    mock_extractor = MagicMock(spec=MetadataExtractor)
+    mock_extractor.extract_from_document.return_value = mock_metadata
+    mock_writer = MagicMock(spec=EnrichmentWriter)
+
+    orchestrator = EnrichmentOrchestrator(
+        spanner_database=mock_db,
+        storage_client=mock_storage,
+        embeddings_client=mock_embeddings,
+        metadata_extractor=mock_extractor,
+        enrichment_writer=mock_writer,
+    )
+
+    result = orchestrator.run(doc_id, dry_run=True)
+
+    assert result.status == EnrichmentStatus.DRY_RUN
+    assert result.technologies_count == 2  # exactly 2 unique canonical techs
+    assert result.unresolved_technologies_count == 0
+    assert result.projected_table_mutations["Technologies"] == 2
+    # ChunkMentionsTech has 3 unique (chunk_id, tech_id) pairs
+    assert result.projected_table_mutations["ChunkMentionsTech"] == 3
+
+
+def test_sidecar_deterministic_bytes_with_explicit_timestamp():
+    """Verify that identical inputs with explicit enriched_at produce identical bytes and SHA-256."""
+    mock_db = MagicMock()
+    mock_storage = MagicMock()
+    orchestrator = EnrichmentOrchestrator(spanner_database=mock_db, storage_client=mock_storage)
+
+    metadata = ExtractedMetadataResult(
+        document_id="doc_det_test",
+        entities=[
+            ValidatedEntity(
+                entity_id="e1",
+                name="TestEntity",
+                category="CONCEPT",
+                description="Desc",
+                chunk_id="chk1",
+                evidence_quote="quote",
+            )
+        ],
+        technologies=[],
+        solution_cards=[
+            ValidatedSolutionCard(
+                card_id="c1",
+                document_id="doc_det_test",
+                project_name="Project",
+                business_problem="Problem",
+                proposed_solution="Proposed",
+                implemented_solution="Impl",
+                outcome="Outcome",
+                chunk_id="chk1",
+                evidence_quote="quote",
+                technologies=[],
+            )
+        ],
+        relationships=[],
+        unresolved_technologies=[],
+        rejected_candidates=[],
+    )
+
+    ts = "2026-11-16T10:00:00+00:00"
+    bytes1 = orchestrator._build_sidecar_bytes("doc_det_test", metadata, 1, 1, enriched_at=ts)
+    bytes2 = orchestrator._build_sidecar_bytes("doc_det_test", metadata, 1, 1, enriched_at=ts)
+
+    assert bytes1 == bytes2
+    sha1 = hashlib.sha256(bytes1).hexdigest()
+    sha2 = hashlib.sha256(bytes2).hexdigest()
+    assert sha1 == sha2
+
+    # Different timestamp produces different bytes and hash
+    ts_different = "2026-11-16T11:00:00+00:00"
+    bytes3 = orchestrator._build_sidecar_bytes("doc_det_test", metadata, 1, 1, enriched_at=ts_different)
+    assert bytes1 != bytes3
+    assert sha1 != hashlib.sha256(bytes3).hexdigest()
+
+
+def test_sidecar_invalid_timestamp_raises_value_error():
+    """Verify that an unparseable timestamp raises ValueError."""
+    orchestrator = EnrichmentOrchestrator(spanner_database=MagicMock(), storage_client=MagicMock())
+    metadata = ExtractedMetadataResult(document_id="doc_test")
+
+    with pytest.raises(ValueError, match="Invalid enriched_at timestamp"):
+        orchestrator._build_sidecar_bytes("doc_test", metadata, 0, 0, enriched_at="not-a-valid-timestamp")
+
+
+def test_orchestrator_run_preserves_explicit_timestamp(monkeypatch):
+    """Verify that orchestrator.run propagates explicit enriched_at into result and sidecar hash."""
+    doc_id = "doc_ts_test"
+    mock_db = MagicMock()
+    mock_storage = MagicMock()
+    mock_embeddings = MagicMock(spec=VertexEmbeddingsClient)
+    mock_embeddings.embed_texts.return_value = [[0.1] * 768]
+
+    orchestrator = EnrichmentOrchestrator(
+        spanner_database=mock_db,
+        storage_client=mock_storage,
+        embeddings_client=mock_embeddings,
+    )
+
+    # Mock checkpoint (unenriched)
+    monkeypatch.setattr(
+        orchestrator,
+        "check_completion_checkpoint",
+        lambda d: (False, {"status_enriched": False}),
+    )
+    # Mock chunks
+    monkeypatch.setattr(
+        orchestrator,
+        "_read_document_chunks",
+        lambda d: {
+            "eligible": [ChunkNode(chunk_id="c1", document_id=d, modality="TEXT", text_content="content")],
+            "excluded": [],
+        },
+    )
+    # Mock extractor
+    mock_meta = ExtractedMetadataResult(document_id=doc_id)
+    monkeypatch.setattr(
+        orchestrator.metadata_extractor,
+        "extract_from_document",
+        lambda *args, **kwargs: mock_meta,
+    )
+
+    explicit_ts = "2026-11-16T14:00:00+00:00"
+    res = orchestrator.run(doc_id, dry_run=True, enriched_at=explicit_ts)
+
+    assert res.status == EnrichmentStatus.DRY_RUN
+    assert res.enriched_at == explicit_ts
+    assert res.sidecar_sha256 is not None
+
+
+
+
 

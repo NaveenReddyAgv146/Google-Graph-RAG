@@ -2,6 +2,7 @@
 
 import threading
 
+from common.config import settings
 from google import genai
 from google.genai import types
 from pydantic import BaseModel
@@ -15,14 +16,7 @@ class _Verdict(BaseModel):
 
 
 def _client() -> genai.Client:
-    """One client per grading thread.
-
-    The eval SDK grades cases on its own thread pool; this initialization runs once
-    per thread. Avoids creating a new client for each eval case, which would re-do
-    ADC and the TLS handshake every time. Each thread gets its own client, because
-    google-auth freezes the SSL context after the first connection when a client
-    certificate is present.
-    """
+    """One client per grading thread."""
     client = getattr(_local, "client", None)
     if client is None:
         # AI Studio (GEMINI_API_KEY) or Gemini platform (ADC).
@@ -34,15 +28,16 @@ def evaluate(instance):
     reference = instance.get("reference")
     rubric = (
         "Grade the agent's final response on a 1-5 scale (1 poor, 5 excellent) for "
-        "accuracy, relevance, and clarity."
+        "accuracy, citation precision, modal preservation (projections remain projections), "
+        "and refusal to fabricate unverified facts."
     )
     if reference:
         rubric += (
             " The response should agree with the expected answer below; penalize "
-            "factual disagreement with it."
+            "factual disagreement or hallucinated citations."
         )
     prompt = (
-        f"You are an expert QA evaluator for an enterprise AI assistant. {rubric}\n"
+        f"You are an expert QA evaluator for an enterprise architecture intelligence assistant. {rubric}\n"
         f"User Prompt: {instance.get('prompt', '')}\n"
         f"Final Response: {instance.get('response', '')}\n"
     )
@@ -50,8 +45,11 @@ def evaluate(instance):
         prompt += f"Expected Answer (ground truth): {reference}\n"
     prompt += f"Full Agent Trace: {instance.get('agent_data', '')}\n"
 
+    # Use centralized Settings.reasoning_model
+    model_name = settings.reasoning_model
+
     response = _client().models.generate_content(
-        model="gemini-3.8-flash",
+        model=model_name,
         contents=prompt,
         config=types.GenerateContentConfig(
             temperature=0,  # deterministic grading

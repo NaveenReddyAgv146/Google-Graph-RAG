@@ -1,0 +1,37 @@
+ENTITIES (24):
+  ent_1623e45bd620731afec73b64e7dc5931f88e78453dc2c6ce: box.net (BUSINESS_UNIT)
+  ent_164fafa40ea0d6989832b0a65fa946a06fd398328257d8ec: Google (BUSINESS_UNIT)
+  ent_18c53c88da7bd337a0a21872c3a16b22195077a27b8a9355: Fusion Books (BUSINESS_UNIT)
+  ent_330fd529ff536133581f880c34bcefe1b0fd5310e2b4b673: The Canva Team (BUSINESS_UNIT)
+  ent_440497f674caf15633d9138c82585f4f01d8ea54c3c121cf: Dropbox (BUSINESS_UNIT)
+  ent_51ebc3cc6142eb34a6fc6ad2c382d97b81ffba48f92d5868: Amazon EC2 (SUBSYSTEM)
+  ent_63135fc2ac214f026e91f61d2f539bb6a2042d6ea6234424: monitoring dashboard (SUBSYSTEM)
+  ent_668a262deb4c13c2b0584ed3b7b794cdb895c053bd1d569a: Freemium model (CONCEPT)
+  ent_690efe019ed858a598d1dda34ae5bcd3c581ae668a8d4214: order service (SUBSYSTEM)
+  ent_6f812446e957714566fd28639d3fc37d68ddeace06c65633: YouTube's video encoding back-end (SUBSYSTEM)
+  ent_869537baabe5de84149f56ddde2a938fe5cac528e7c5bc99: redundant gateways (SUBSYSTEM)
+  ent_913e052468bd0b159f0693fd83e10cf132f615601108be75: Amazon S3 (SUBSYSTEM)
+  ent_def4c314b9ea4db6aadb6b7d061192ecda063caacd51ebd0: Foldershare (BUSINESS_UNIT)
+  ent_e17ba3ed5fc3dafe8db9022af4343a628f7d72bf8837040b: Flash Video (STANDARD)
+  ent_e188b95d7d29be257472a39e17398d839b60a4cd78488658: CANVA (BUSINESS_UNIT)
+  ent_e59b627734295dacbade1603636581c844373ed45237fc75: CANVA editor (SUBSYSTEM)
+  ent_f33d2cf9323b4265fb32bacf4a918aedac215af15e73db87: branch (CONCEPT)
+  ent_f7c244a1a72ec850677d833850de43bb8ea7527f53018ae6: PayPal (BUSINESS_UNIT)
+  entity_google_maps: Google Maps (API)
+  entity_medallion_system: The Medallion System (CONCEPT)
+  entity_ubercab: UberCab (BUSINESS_UNIT)
+  entity_ubercab_apps: UberCab apps (SUBSYSTEM)
+  entity_ubercab_com: UberCab.com (SUBSYSTEM)
+  entity_yellowcab: YellowCab (BUSINESS_UNIT)
+
+TECHNOLOGIES (2):
+  tech_aws_s3: Amazon S3 (Storage)
+  tech_python: Python (Programming Language)
+
+ENTITY_REFERENCES_ENTITY (6):
+  ent_440497f674caf15633d9138c82585f4f01d8ea54c3c121cf -> ent_51ebc3cc6142eb34a6fc6ad2c382d97b81ffba48f92d5868
+  ent_440497f674caf15633d9138c82585f4f01d8ea54c3c121cf -> ent_913e052468bd0b159f0693fd83e10cf132f615601108be75
+  ent_6f812446e957714566fd28639d3fc37d68ddeace06c65633 -> ent_e17ba3ed5fc3dafe8db9022af4343a628f7d72bf8837040b
+  ent_e188b95d7d29be257472a39e17398d839b60a4cd78488658 -> ent_668a262deb4c13c2b0584ed3b7b794cdb895c053bd1d569a
+  ent_f33d2cf9323b4265fb32bacf4a918aedac215af15e73db87 -> ent_690efe019ed858a598d1dda34ae5bcd3c581ae668a8d4214
+  entity_ubercab_com -> entity_google_maps

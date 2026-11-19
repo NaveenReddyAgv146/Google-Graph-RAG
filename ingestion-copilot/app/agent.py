@@ -1,75 +1,50 @@
-# ruff: noqa
-# Copyright 2026 Google LLC
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     https://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+"""ADK Agent Definition for Ingestion Copilot.
 
-import datetime
-from zoneinfo import ZoneInfo
+Exposes:
+1. trigger_pdf_ingestion: Triggers Document AI layout parsing and chunk persistence.
+2. trigger_slides_ingestion: Triggers Google Slides layout extraction, asset upload, and chunk persistence.
+3. check_document_ingestion_status: Queries Spanner for extraction, enrichment, and human-approval states.
+"""
 
 from google.adk.agents import Agent
 from google.adk.apps import App
 from google.adk.models import Gemini
 from google.genai import types
 
+from app.tools.ingestion_tools import (
+    check_document_ingestion_status,
+    trigger_pdf_ingestion,
+    trigger_slides_ingestion,
+)
+from common.config import settings
 
-MODEL = "gemini-3.8-flash"
-
-
-def get_weather(query: str) -> str:
-    """Simulates a web search. Use it get information on weather.
-
-    Args:
-        query: A string containing the location to get weather information for.
-
-    Returns:
-        A string with the simulated weather information for the queried location.
-    """
-    if "sf" in query.lower() or "san francisco" in query.lower():
-        return "It's 60 degrees and foggy."
-    return "It's 90 degrees and sunny."
-
-
-def get_current_time(query: str) -> str:
-    """Simulates getting the current time for a city.
-
-    Args:
-        city: The name of the city to get the current time for.
-
-    Returns:
-        A string with the current time information.
-    """
-    if "sf" in query.lower() or "san francisco" in query.lower():
-        tz_identifier = "America/Los_Angeles"
-    else:
-        return f"Sorry, I don't have timezone information for query: {query}."
-
-    tz = ZoneInfo(tz_identifier)
-    now = datetime.datetime.now(tz)
-    return f"The current time for query {query} is {now.strftime('%Y-%m-%d %H:%M:%S %Z%z')}"
-
+MODEL = settings.reasoning_model
 
 root_agent = Agent(
     # Keep in sync with create_params.root_agent_name in agents-cli-manifest.yaml:
-    # telemetry reports this name as gen_ai.agent.name, and agents-cli reports the
-    # manifest's value. Renaming the agent only here makes the two disagree, and
-    # anything selecting traces by name stops finding this agent's.
     name="ingestion_copilot",
     model=Gemini(
         model=MODEL,
         retry_options=types.HttpRetryOptions(attempts=3),
     ),
-    instruction="You are a helpful AI assistant designed to provide accurate and useful information.",
-    tools=[get_weather, get_current_time],
+    instruction="""You are Ingestion Copilot, an enterprise architecture intelligence assistant specializing in document ingestion, layout parsing, and processing status tracking.
+
+Your capabilities:
+1. Ingest enterprise PDF whitepapers and reports stored in approved Cloud Storage buckets (trigger_pdf_ingestion).
+2. Ingest Google Slides pitch decks and architectural presentations via Presentation ID or URL (trigger_slides_ingestion).
+3. Check document ingestion progress, extraction status, chunk counts, enrichment, and human verification status (check_document_ingestion_status).
+
+Operating Guidelines:
+- When asked to ingest a PDF, verify the user has provided a valid gs:// URI in an approved bucket before dispatching.
+- When asked to ingest a presentation, extract and validate the Google Slides presentation ID or URL.
+- When asked about ingestion status, clearly report extraction, enrichment, and human review status.
+- Strict Knowledge Protection: Never claim a document or solution is APPROVED unless the database explicitly reports VerificationStatus == 'APPROVED'. Solution cards remain in PENDING status until an authorized architect approves them.
+""",
+    tools=[
+        trigger_pdf_ingestion,
+        trigger_slides_ingestion,
+        check_document_ingestion_status,
+    ],
 )
 
 app = App(

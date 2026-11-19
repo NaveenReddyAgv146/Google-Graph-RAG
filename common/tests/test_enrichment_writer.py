@@ -865,4 +865,300 @@ def test_enrichment_writer_updates_legacy_card_okf_uri_preserving_status_and_con
     assert txn.inserts["SolutionImplementsDoc"][0]["CardId"] == "card_canonical_new"
 
 
+def test_writer_skips_unresolved_technologies_and_mentions():
+    """Verify unresolved technologies (is_canonical=False, tech_id=None) produce 0 mutations in Technologies and ChunkMentionsTech."""
+    doc_id = "doc_unresolved_techs"
+    state = {
+        "Documents": [(doc_id, "READY")],
+        "EvidenceChunks": [
+            ("chk_1", "TEXT", "YouTube video encoding uses Flash Video and Broadband Internet.", 1, None, None, doc_id),
+        ],
+        "Entities": [],
+        "Technologies": [],
+        "SolutionCards": [],
+        "SolutionImplementsDoc": [],
+        "ChunkReferencesEntity": [],
+        "ChunkMentionsTech": [],
+        "SolutionSupportsTech": [],
+        "EntityReferencesEntity": [],
+        "EvidenceLinks": [],
+    }
+
+    db = MockSpannerDatabase(state)
+    writer = EnrichmentWriter(database=db)
+
+    # 2 unresolved technologies and 1 canonical technology
+    payload = EnrichmentPayload(
+        document_id=doc_id,
+        chunk_embeddings={"chk_1": VALID_768_VEC_1},
+        technologies=[
+            ValidatedTechnology(
+                raw_name="Flash Video",
+                chunk_id="chk_1",
+                evidence_quote="Flash Video",
+                tech_id=None,
+                canonical_name=None,
+                category=None,
+                is_canonical=False,
+                unresolved=True,
+            ),
+            ValidatedTechnology(
+                raw_name="Broadband Internet",
+                chunk_id="chk_1",
+                evidence_quote="Broadband Internet",
+                tech_id=None,
+                canonical_name=None,
+                category=None,
+                is_canonical=False,
+                unresolved=True,
+            ),
+            ValidatedTechnology(
+                raw_name="Cloud Spanner",
+                chunk_id="chk_1",
+                evidence_quote="Cloud Spanner",
+                tech_id="tech_cloud_spanner",
+                canonical_name="Cloud Spanner",
+                category="Database",
+                is_canonical=True,
+                unresolved=False,
+            ),
+        ],
+        sidecar_uri=f"gs://bucket/metadata/{doc_id}.meta.json",
+        sidecar_sha256="c" * 64,
+    )
+
+    result = writer.persist_enrichment(payload)
+
+    # Only the 1 canonical technology should be inserted
+    assert result.technologies_inserted == 1
+    assert result.technologies_unchanged == 0
+
+    txn = db.last_transaction
+    assert "Technologies" in txn.inserts
+    assert len(txn.inserts["Technologies"]) == 1
+    assert txn.inserts["Technologies"][0]["TechId"] == "tech_cloud_spanner"
+
+    # Only 1 ChunkMentionsTech edge for the canonical tech
+    assert "ChunkMentionsTech" in txn.inserts
+    assert len(txn.inserts["ChunkMentionsTech"]) == 1
+    assert txn.inserts["ChunkMentionsTech"][0]["TechId"] == "tech_cloud_spanner"
+
+
+def test_projected_mutations_match_writer_buffered_mutations_for_unresolved_and_canonical():
+    """Verify orchestrator projection and writer actual buffered mutations agree for both unresolved and canonical cases."""
+    # CASE 1: UNRESOLVED TECHNOLOGIES (YouTube document scenario)
+    doc_id_1 = "doc_proj_unresolved"
+    state_1 = {
+        "Documents": [(doc_id_1, "READY")],
+        "EvidenceChunks": [
+            ("chk_1", "TEXT", "YouTube video encoding backend converts to Flash Video.", 1, None, None, doc_id_1),
+        ],
+        "Entities": [],
+        "Technologies": [],
+        "SolutionCards": [],
+        "SolutionImplementsDoc": [],
+        "ChunkReferencesEntity": [],
+        "ChunkMentionsTech": [],
+        "SolutionSupportsTech": [],
+        "EntityReferencesEntity": [],
+        "EvidenceLinks": [],
+    }
+
+    db_1 = MockSpannerDatabase(state_1)
+    writer_1 = EnrichmentWriter(database=db_1)
+
+    unresolved_techs = [
+        ValidatedTechnology(
+            raw_name="Flash Video",
+            chunk_id="chk_1",
+            evidence_quote="Flash Video",
+            tech_id=None,
+            canonical_name=None,
+            category=None,
+            is_canonical=False,
+            unresolved=True,
+        ),
+        ValidatedTechnology(
+            raw_name="Broadband Internet",
+            chunk_id="chk_1",
+            evidence_quote="Broadband Internet",
+            tech_id=None,
+            canonical_name=None,
+            category=None,
+            is_canonical=False,
+            unresolved=True,
+        ),
+    ]
+
+    entities = [
+        ValidatedEntity(
+            name="YouTube",
+            category="ORGANIZATION",
+            description="Video platform",
+            chunk_id="chk_1",
+            evidence_quote="YouTube video encoding",
+            entity_id="ent_youtube",
+        )
+    ]
+
+    cards = [
+        ValidatedSolutionCard(
+            card_id="card_yt",
+            document_id=doc_id_1,
+            project_name="YouTube Platform",
+            business_problem="Hosting",
+            proposed_solution="Streaming",
+            implemented_solution="Flash backend",
+            outcome="Dominance",
+            chunk_id="chk_1",
+            evidence_quote="YouTube video encoding backend converts to Flash Video.",
+            technologies=[],
+        )
+    ]
+
+    payload_unresolved = EnrichmentPayload(
+        document_id=doc_id_1,
+        chunk_embeddings={"chk_1": VALID_768_VEC_1},
+        entities=entities,
+        technologies=unresolved_techs,
+        solution_cards=cards,
+        relationships=[],
+        sidecar_uri=f"gs://bucket/metadata/{doc_id_1}.meta.json",
+        sidecar_sha256="d" * 64,
+    )
+
+    write_result_1 = writer_1.persist_enrichment(payload_unresolved)
+
+    # Calculate orchestrator projection with new eligibility rule
+    canonical_tech_count_1 = len({t.tech_id for t in unresolved_techs if t.is_canonical and t.tech_id})
+    cmt_count_1 = len({(t.chunk_id, t.tech_id) for t in unresolved_techs if t.chunk_id and t.tech_id and t.is_canonical})
+
+    projected_table_1 = {
+        "EvidenceChunks": 1,
+        "Entities": len(entities),
+        "Technologies": canonical_tech_count_1,  # 0
+        "SolutionCards": len(cards),             # 1
+        "ChunkReferencesEntity": 1,              # 1
+        "ChunkMentionsTech": cmt_count_1,        # 0
+        "SolutionSupportsTech": 0,               # 0
+        "SolutionImplementsDoc": 1,              # 1
+        "EntityReferencesEntity": 0,             # 0
+        "EvidenceLinks": 1,                      # 1
+        "Documents": 1,                          # 1
+    }
+    projected_total_1 = sum(projected_table_1.values())
+
+    # Total = 1 + 1 + 0 + 1 + 1 + 0 + 0 + 1 + 0 + 1 + 1 = 7
+    assert projected_total_1 == 7
+    assert write_result_1.total_mutations == 7
+    assert write_result_1.total_mutations == projected_total_1
+    assert write_result_1.technologies_inserted == projected_table_1["Technologies"]
+
+    txn_1 = db_1.last_transaction
+    assert "Technologies" not in txn_1.inserts
+    assert "ChunkMentionsTech" not in txn_1.inserts
+
+    # CASE 2: CANONICAL TECHNOLOGIES
+    doc_id_2 = "doc_proj_canonical"
+    state_2 = {
+        "Documents": [(doc_id_2, "READY")],
+        "EvidenceChunks": [
+            ("chk_1", "TEXT", "Migrated to Cloud Spanner and BigQuery.", 1, None, None, doc_id_2),
+        ],
+        "Entities": [],
+        "Technologies": [],
+        "SolutionCards": [],
+        "SolutionImplementsDoc": [],
+        "ChunkReferencesEntity": [],
+        "ChunkMentionsTech": [],
+        "SolutionSupportsTech": [],
+        "EntityReferencesEntity": [],
+        "EvidenceLinks": [],
+    }
+
+    db_2 = MockSpannerDatabase(state_2)
+    writer_2 = EnrichmentWriter(database=db_2)
+
+    canonical_techs = [
+        ValidatedTechnology(
+            raw_name="Cloud Spanner",
+            chunk_id="chk_1",
+            evidence_quote="Cloud Spanner",
+            tech_id="tech_spanner",
+            canonical_name="Cloud Spanner",
+            category="Database",
+            is_canonical=True,
+            unresolved=False,
+        ),
+        ValidatedTechnology(
+            raw_name="BigQuery",
+            chunk_id="chk_1",
+            evidence_quote="BigQuery",
+            tech_id="tech_bigquery",
+            canonical_name="BigQuery",
+            category="Analytics",
+            is_canonical=True,
+            unresolved=False,
+        ),
+    ]
+
+    cards_2 = [
+        ValidatedSolutionCard(
+            card_id="card_data",
+            document_id=doc_id_2,
+            project_name="Data Platform",
+            business_problem="Scale",
+            proposed_solution="Modern Data",
+            implemented_solution="Spanner + BQ",
+            outcome="Success",
+            chunk_id="chk_1",
+            evidence_quote="Migrated to Cloud Spanner and BigQuery.",
+            technologies=["tech_spanner", "tech_bigquery"],
+        )
+    ]
+
+    payload_canonical = EnrichmentPayload(
+        document_id=doc_id_2,
+        chunk_embeddings={"chk_1": VALID_768_VEC_1},
+        entities=entities,
+        technologies=canonical_techs,
+        solution_cards=cards_2,
+        relationships=[],
+        sidecar_uri=f"gs://bucket/metadata/{doc_id_2}.meta.json",
+        sidecar_sha256="e" * 64,
+    )
+
+    write_result_2 = writer_2.persist_enrichment(payload_canonical)
+
+    canonical_tech_count_2 = len({t.tech_id for t in canonical_techs if t.is_canonical and t.tech_id})
+    cmt_count_2 = len({(t.chunk_id, t.tech_id) for t in canonical_techs if t.chunk_id and t.tech_id and t.is_canonical})
+
+    projected_table_2 = {
+        "EvidenceChunks": 1,
+        "Entities": len(entities),
+        "Technologies": canonical_tech_count_2,  # 2
+        "SolutionCards": len(cards_2),           # 1
+        "ChunkReferencesEntity": 1,              # 1
+        "ChunkMentionsTech": cmt_count_2,        # 2
+        "SolutionSupportsTech": 2,               # 2
+        "SolutionImplementsDoc": 1,              # 1
+        "EntityReferencesEntity": 0,             # 0
+        "EvidenceLinks": 1,                      # 1
+        "Documents": 1,                          # 1
+    }
+    projected_total_2 = sum(projected_table_2.values())
+
+    # Total = 1 + 1 + 2 + 1 + 1 + 2 + 2 + 1 + 0 + 1 + 1 = 13
+    assert projected_total_2 == 13
+    assert write_result_2.total_mutations == 13
+    assert write_result_2.total_mutations == projected_total_2
+    assert write_result_2.technologies_inserted == projected_table_2["Technologies"]
+
+    txn_2 = db_2.last_transaction
+    assert len(txn_2.inserts["Technologies"]) == 2
+    assert len(txn_2.inserts["ChunkMentionsTech"]) == 2
+
+
+
+
 

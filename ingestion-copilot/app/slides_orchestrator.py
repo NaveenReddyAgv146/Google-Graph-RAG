@@ -43,6 +43,7 @@ from common.storage.asset_uploader import (
     UploadedVisualAsset,
     VisualAssetUploader,
 )
+from app.app_utils.orphan_tracker import OrphanAssetRecord, orphan_tracker
 
 logger = logging.getLogger("ingestion_copilot.slides_orchestrator")
 
@@ -114,6 +115,8 @@ class SlidesIngestionResult:
     write_result: SlidesWriteResult | None = None
     uploaded_assets: list[UploadedVisualAsset] = field(default_factory=list)
     compensated_assets: dict[str, list[str]] | None = None
+    orphaned_assets: list[str] = field(default_factory=list)
+    compensation_error: str | None = None
     dry_run: bool = False
     error_message: str | None = None
     error_type: str | None = None
@@ -451,6 +454,8 @@ class GoogleSlidesOrchestrator:
 
             # Critical Invariant: Compensate GCS assets if Spanner transaction fails
             compensated_summary = None
+            orphaned_assets: list[str] = []
+            compensation_error: str | None = None
             if uploaded_assets and not dry_run:
                 logger.info(
                     f"Executing GCS compensating rollback for {len(uploaded_assets)} assets of doc '{doc_id}'..."
@@ -459,7 +464,24 @@ class GoogleSlidesOrchestrator:
                     compensated_summary = self.asset_uploader.compensate_upload_batch(uploaded_assets)
                     logger.info(f"GCS compensation completed for doc '{doc_id}': {compensated_summary}")
                 except Exception as comp_err:
-                    logger.error(f"GCS compensation encountered an error for doc '{doc_id}': {comp_err}")
+                    compensation_error = str(comp_err)
+                    orphaned_assets = [a.gcs_uri for a in uploaded_assets if a.action == "CREATED"]
+                    logger.critical(
+                        f"GCS compensation failed for doc '{doc_id}' (presentation '{presentation_id}'). "
+                        f"Missing 'storage.objects.delete' permission under least-privilege 'roles/storage.objectCreator' policy. "
+                        f"Tracking {len(orphaned_assets)} orphaned assets for reconciliation: {orphaned_assets}. "
+                        f"Underlying error: {comp_err}"
+                    )
+                    orphan_tracker.record_orphans(
+                        OrphanAssetRecord(
+                            document_id=doc_id,
+                            presentation_id=presentation_id,
+                            gcs_uris=orphaned_assets,
+                            reason="Spanner persistence failed; GCS compensation deletion denied under storage.objectCreator policy",
+                            error_detail=str(comp_err),
+                            timestamp=time.time(),
+                        )
+                    )
 
             return SlidesIngestionResult(
                 presentation_id=presentation_id,
@@ -472,6 +494,8 @@ class GoogleSlidesOrchestrator:
                 visual_assets_count=len(normalized_presentation.visual_assets),
                 uploaded_assets=uploaded_assets,
                 compensated_assets=compensated_summary,
+                orphaned_assets=orphaned_assets,
+                compensation_error=compensation_error,
                 error_message=str(db_exc),
                 error_type=type(db_exc).__name__,
                 dry_run=dry_run,

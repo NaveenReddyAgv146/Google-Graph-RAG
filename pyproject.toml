@@ -8,6 +8,7 @@ requires-python = ">=3.11,<3.14"
 members = [
     "ingestion-copilot",
     "discovery-copilot",
+    "gateway",
     "common",
 ]
 

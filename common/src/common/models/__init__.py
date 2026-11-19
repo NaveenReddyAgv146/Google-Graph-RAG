@@ -2,8 +2,10 @@
 
 from common.models.schema import (
     ChunkNode,
+    ClaimCategory,
     DocumentNode,
     EntityNode,
+    EvidenceLinkNode,
     RepositoryNode,
     SolutionCardNode,
     SourceFileNode,
@@ -13,8 +15,10 @@ from common.models.schema import (
 
 __all__ = [
     "ChunkNode",
+    "ClaimCategory",
     "DocumentNode",
     "EntityNode",
+    "EvidenceLinkNode",
     "RepositoryNode",
     "SolutionCardNode",
     "SourceFileNode",

@@ -27,8 +27,17 @@ from app.app_utils.a2a import attach_a2a_routes
 from app.app_utils.reasoning_engine_adapter import (
     attach_reasoning_engine_routes,
 )
+from app.app_utils.security import (
+    EnforceAuthenticatedPrincipalMiddleware,
+    is_local_test_auth_enabled,
+    is_production_environment,
+)
 
 load_dotenv()
+
+# Strict Production Security Check: Fail startup immediately if local test auth is enabled in production
+if is_production_environment() and os.getenv("ENABLE_LOCAL_TEST_AUTH", "false").lower() in ("true", "1"):
+    raise RuntimeError("FATAL SECURITY VIOLATION: ENABLE_LOCAL_TEST_AUTH is strictly prohibited in production!")
 allow_origins = (
     os.getenv("ALLOW_ORIGINS", "").split(",") if os.getenv("ALLOW_ORIGINS") else None
 )
@@ -73,6 +82,9 @@ app: FastAPI = get_fast_api_app(
 )
 app.title = "discovery-copilot"
 app.description = "API for interacting with the Agent discovery-copilot"
+
+# Security: Enforce cryptographic IAP identity validation and prevent session spoofing
+app.add_middleware(EnforceAuthenticatedPrincipalMiddleware)
 
 # Proxy routes so the Google Cloud console playground (reasoning_engine SDK) can
 # talk to this agent alongside the native adk_api routes.

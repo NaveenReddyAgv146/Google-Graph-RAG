@@ -7,8 +7,12 @@ from google.adk.apps import App
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 
-from app.agent import app as adk_app
-from app.agent import get_current_time, get_weather, root_agent
+from app.agent import app as adk_app, root_agent
+from app.tools.discovery_tools import (
+    get_solution_evidence_detail,
+    search_approved_solutions,
+    traverse_technology_graph,
+)
 from app.app_utils import services
 from app.fast_api_app import app as fastapi_app
 
@@ -17,17 +21,16 @@ def test_root_agent_initialization():
     """Verifies that the root agent initializes with correct ADK types and metadata."""
     assert isinstance(root_agent, LlmAgent)
     assert root_agent.name == "discovery_copilot"
-    assert len(root_agent.tools) == 2
-    assert "helpful AI assistant" in root_agent.instruction
+    assert len(root_agent.tools) == 3
+    assert "Discovery Copilot" in root_agent.instruction
 
 
-def test_placeholder_tools_execution():
-    """Verifies that registered placeholder tools execute deterministically."""
-    weather = get_weather("san francisco")
-    assert "60 degrees and foggy" in weather
-
-    time_sf = get_current_time("san francisco")
-    assert "The current time" in time_sf
+def test_production_tools_registered():
+    """Verifies that registered discovery tools match production toolset."""
+    tool_names = [getattr(t, "__name__", None) for t in root_agent.tools]
+    assert "search_approved_solutions" in tool_names
+    assert "traverse_technology_graph" in tool_names
+    assert "get_solution_evidence_detail" in tool_names
 
 
 def test_adk_app_and_runner_initialization():

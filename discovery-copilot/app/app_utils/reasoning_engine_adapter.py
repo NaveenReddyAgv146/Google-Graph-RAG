@@ -26,10 +26,11 @@ import inspect
 import json
 
 from agentplatform.frameworks.adk import AdkApp
-from fastapi import FastAPI, HTTPException, Request, encoders, responses
+from fastapi import FastAPI, HTTPException, Request, encoders, responses, status
 from starlette.concurrency import iterate_in_threadpool, run_in_threadpool
 
 from app.app_utils import services
+from app.app_utils.security import AuthenticationError, extract_and_verify_principal
 
 
 def _no_op_instrumentor_builder(project_id: str) -> None:
@@ -79,8 +80,18 @@ def attach_reasoning_engine_routes(app: FastAPI) -> None:
     @app.post("/api/stream_reasoning_engine")
     async def stream_query(request: Request) -> responses.StreamingResponse:
         body = await request.json()
+        try:
+            verified_principal = extract_and_verify_principal(
+                request, body_dict=body, allow_agent_runtime_direct=True
+            )
+        except AuthenticationError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.message)
+
         method = resolve_method(body["class_method"], streaming=True)
-        kwargs = body.get("input") or {}
+        kwargs = dict(body.get("input") or {})
+        # Force user_id to verified principal, strictly prohibiting caller override
+        kwargs["user_id"] = verified_principal
+
         stream = (
             await method(**kwargs)
             if inspect.iscoroutinefunction(method)
@@ -102,8 +113,18 @@ def attach_reasoning_engine_routes(app: FastAPI) -> None:
     @app.post("/api/reasoning_engine")
     async def query(request: Request) -> responses.JSONResponse:
         body = await request.json()
+        try:
+            verified_principal = extract_and_verify_principal(
+                request, body_dict=body, allow_agent_runtime_direct=True
+            )
+        except AuthenticationError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.message)
+
         method = resolve_method(body["class_method"], streaming=False)
-        kwargs = body.get("input") or {}
+        kwargs = dict(body.get("input") or {})
+        # Force user_id to verified principal, strictly prohibiting caller override
+        kwargs["user_id"] = verified_principal
+
         if inspect.iscoroutinefunction(method):
             output = await method(**kwargs)
         else:

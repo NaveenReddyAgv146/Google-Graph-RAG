@@ -1,0 +1,696 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Enterprise GraphRAG — Document Ingestion Portal</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card-bg: #1e293b;
+      --card-border: #334155;
+      --primary: #38bdf8;
+      --primary-hover: #0284c7;
+      --primary-light: rgba(56, 189, 248, 0.1);
+      --success: #22c55e;
+      --success-light: rgba(34, 197, 94, 0.1);
+      --warning: #f59e0b;
+      --warning-light: rgba(245, 158, 11, 0.1);
+      --danger: #ef4444;
+      --danger-light: rgba(239, 68, 68, 0.1);
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+      --border: #334155;
+      --border-focus: #38bdf8;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background-color: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* Header */
+    header {
+      background: var(--card-bg);
+      border-bottom: 1px solid var(--border);
+      padding: 1rem 2rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .header-branding {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+    .logo-icon {
+      width: 32px;
+      height: 32px;
+      background: var(--primary);
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #0f172a;
+      font-weight: 800;
+      font-size: 1.1rem;
+    }
+    .header-branding h1 {
+      font-size: 1.15rem;
+      font-weight: 700;
+      color: var(--text);
+    }
+    .header-branding span {
+      font-size: 0.85rem;
+      color: var(--primary);
+      margin-left: 0.5rem;
+      font-weight: 500;
+    }
+    .user-badge {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      background: rgba(255, 255, 255, 0.05);
+      padding: 0.4rem 0.85rem;
+      border-radius: 9999px;
+      border: 1px solid var(--border);
+    }
+    .user-badge .user-email {
+      color: var(--primary);
+      font-weight: 600;
+    }
+
+    /* Main Container */
+    main {
+      flex: 1;
+      max-width: 800px;
+      width: 100%;
+      margin: 2.5rem auto;
+      padding: 0 1.5rem;
+      display: flex;
+      flex-direction: column;
+      gap: 1.5rem;
+    }
+
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 12px;
+      padding: 2rem;
+      box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3), 0 2px 4px -2px rgba(0, 0, 0, 0.2);
+    }
+
+    .card-title {
+      font-size: 1.3rem;
+      font-weight: 700;
+      margin-bottom: 0.5rem;
+      color: var(--text);
+    }
+    .card-subtitle {
+      font-size: 0.9rem;
+      color: var(--text-muted);
+      margin-bottom: 1.75rem;
+      line-height: 1.4;
+    }
+
+    /* Drop Zone */
+    .dropzone {
+      border: 2px dashed var(--border);
+      border-radius: 10px;
+      padding: 2.5rem 1.5rem;
+      text-align: center;
+      cursor: pointer;
+      transition: all 0.2s ease-in-out;
+      background: rgba(15, 23, 42, 0.4);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0.75rem;
+      outline: none;
+    }
+    .dropzone:hover, .dropzone.dragover {
+      border-color: var(--primary);
+      background: var(--primary-light);
+    }
+    .dropzone svg {
+      width: 48px;
+      height: 48px;
+      fill: none;
+      stroke: var(--primary);
+      stroke-width: 1.75;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      margin-bottom: 0.25rem;
+    }
+    .dropzone-prompt {
+      font-size: 1rem;
+      font-weight: 600;
+      color: var(--text);
+    }
+    .dropzone-subtext {
+      font-size: 0.825rem;
+      color: var(--text-muted);
+    }
+    .file-input {
+      display: none;
+    }
+
+    /* Selected File Preview */
+    .file-preview {
+      display: none;
+      background: rgba(15, 23, 42, 0.6);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1rem 1.25rem;
+      margin-top: 1.25rem;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .file-preview.active {
+      display: flex;
+    }
+    .file-info {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      overflow: hidden;
+    }
+    .file-icon {
+      color: var(--danger);
+      font-size: 1.5rem;
+      line-height: 1;
+    }
+    .file-details {
+      display: flex;
+      flex-direction: column;
+      gap: 0.2rem;
+      overflow: hidden;
+    }
+    .file-name {
+      font-size: 0.95rem;
+      font-weight: 600;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 450px;
+    }
+    .file-size {
+      font-size: 0.8rem;
+      color: var(--text-muted);
+    }
+    .remove-file-btn {
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      cursor: pointer;
+      padding: 0.35rem 0.6rem;
+      border-radius: 6px;
+      font-size: 0.85rem;
+      transition: all 0.15s ease;
+    }
+    .remove-file-btn:hover {
+      background: rgba(239, 68, 68, 0.2);
+      color: var(--danger);
+    }
+
+    /* Action Buttons */
+    .action-group {
+      margin-top: 1.5rem;
+      display: flex;
+      justify-content: flex-end;
+      gap: 0.75rem;
+    }
+    .btn {
+      padding: 0.65rem 1.25rem;
+      border-radius: 8px;
+      font-size: 0.9rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      border: none;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .btn-primary {
+      background: var(--primary);
+      color: #0f172a;
+    }
+    .btn-primary:hover:not(:disabled) {
+      background: var(--primary-hover);
+      color: #fff;
+    }
+    .btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    /* Progress Bar */
+    .progress-section {
+      display: none;
+      margin-top: 1.5rem;
+    }
+    .progress-section.active {
+      display: block;
+    }
+    .progress-header {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      margin-bottom: 0.5rem;
+    }
+    .progress-track {
+      background: rgba(15, 23, 42, 0.8);
+      border-radius: 9999px;
+      height: 8px;
+      overflow: hidden;
+      border: 1px solid var(--border);
+    }
+    .progress-fill {
+      background: linear-gradient(90deg, var(--primary), #3b82f6);
+      height: 100%;
+      width: 0%;
+      transition: width 0.1s ease;
+    }
+
+    /* Alert / Result Cards */
+    .result-card {
+      display: none;
+      border-radius: 10px;
+      padding: 1.25rem 1.5rem;
+      margin-top: 1.5rem;
+    }
+    .result-card.active {
+      display: block;
+    }
+    .result-card.success {
+      background: var(--success-light);
+      border: 1px solid var(--success);
+    }
+    .result-card.duplicate {
+      background: var(--warning-light);
+      border: 1px solid var(--warning);
+    }
+    .result-card.error {
+      background: var(--danger-light);
+      border: 1px solid var(--danger);
+    }
+    .result-header {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-weight: 700;
+      font-size: 1.05rem;
+      margin-bottom: 0.75rem;
+    }
+    .result-card.success .result-header { color: var(--success); }
+    .result-card.duplicate .result-header { color: var(--warning); }
+    .result-card.error .result-header { color: var(--danger); }
+
+    .result-details {
+      display: grid;
+      grid-template-columns: 140px 1fr;
+      gap: 0.5rem 1rem;
+      font-size: 0.875rem;
+      margin-top: 0.75rem;
+    }
+    .result-label {
+      color: var(--text-muted);
+      font-weight: 500;
+    }
+    .result-value {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      color: var(--text);
+      word-break: break-all;
+    }
+    .badge {
+      display: inline-block;
+      padding: 0.15rem 0.5rem;
+      border-radius: 4px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .badge-success { background: rgba(34, 197, 94, 0.2); color: var(--success); }
+    .badge-warning { background: rgba(245, 158, 11, 0.2); color: var(--warning); }
+
+    .copy-btn {
+      background: rgba(255, 255, 255, 0.1);
+      border: none;
+      color: var(--text-muted);
+      cursor: pointer;
+      padding: 0.1rem 0.4rem;
+      border-radius: 4px;
+      font-size: 0.75rem;
+      margin-left: 0.5rem;
+    }
+    .copy-btn:hover { color: var(--text); background: rgba(255, 255, 255, 0.2); }
+
+    /* Footer */
+    footer {
+      text-align: center;
+      padding: 1.5rem;
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      border-top: 1px solid var(--border);
+      background: var(--card-bg);
+      margin-top: auto;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="header-branding">
+      <div class="logo-icon">G</div>
+      <div>
+        <h1>Enterprise GraphRAG <span>Ingestion Portal</span></h1>
+      </div>
+    </div>
+    <div class="user-badge" id="userBadge">
+      <span class="user-label">Principal:</span>
+      <span class="user-email" id="userEmail">{{ authenticated_user }}</span>
+    </div>
+  </header>
+
+  <main>
+    <div class="card">
+      <h2 class="card-title">Upload Knowledge Document</h2>
+      <p class="card-subtitle">
+        Securely submit enterprise PDF documents for automated chunking, entity extraction,
+        and knowledge graph indexing. Files are deterministically fingerprinted using SHA-256.
+      </p>
+
+      <!-- Drag & Drop Zone -->
+      <div class="dropzone" id="dropzone" tabindex="0" role="button" aria-label="Upload document drop zone">
+        <svg viewBox="0 0 24 24">
+          <path d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"></path>
+        </svg>
+        <div class="dropzone-prompt">Drag & drop your PDF file here, or click to browse</div>
+        <div class="dropzone-subtext">PDF documents only &bull; Maximum file size: 50 MB</div>
+        <input type="file" id="fileInput" class="file-input" accept="application/pdf, .pdf" />
+      </div>
+
+      <!-- File Preview -->
+      <div class="file-preview" id="filePreview">
+        <div class="file-info">
+          <span class="file-icon">&#128196;</span>
+          <div class="file-details">
+            <div class="file-name" id="previewName">filename.pdf</div>
+            <div class="file-size" id="previewSize">0 MB</div>
+          </div>
+        </div>
+        <button type="button" class="remove-file-btn" id="removeFileBtn" title="Remove selected file">Remove</button>
+      </div>
+
+      <!-- Progress Bar -->
+      <div class="progress-section" id="progressSection">
+        <div class="progress-header">
+          <span id="progressStatus">Uploading and verifying...</span>
+          <span id="progressPercent">0%</span>
+        </div>
+        <div class="progress-track">
+          <div class="progress-fill" id="progressFill"></div>
+        </div>
+      </div>
+
+      <!-- Result Card -->
+      <div class="result-card" id="resultCard">
+        <div class="result-header" id="resultHeader">
+          <span id="resultIcon">&#10003;</span>
+          <span id="resultTitle">Upload Result</span>
+        </div>
+        <div id="resultMessage" style="font-size: 0.9rem; margin-bottom: 0.75rem;"></div>
+        <div class="result-details" id="resultDetails"></div>
+      </div>
+
+      <!-- Actions -->
+      <div class="action-group">
+        <button type="button" class="btn btn-primary" id="uploadBtn" disabled>
+          <span>Upload Document</span>
+        </button>
+      </div>
+    </div>
+  </main>
+
+  <footer>
+    Enterprise GraphRAG &bull; Ingestion Copilot &bull; Authenticated via Identity-Aware Proxy &amp; Spanner RBAC
+  </footer>
+
+  <script>
+    (function () {
+      const MAX_SIZE_BYTES = 50 * 1024 * 1024; // 50MB
+      let selectedFile = null;
+
+      const dropzone = document.getElementById("dropzone");
+      const fileInput = document.getElementById("fileInput");
+      const filePreview = document.getElementById("filePreview");
+      const previewName = document.getElementById("previewName");
+      const previewSize = document.getElementById("previewSize");
+      const removeFileBtn = document.getElementById("removeFileBtn");
+      const uploadBtn = document.getElementById("uploadBtn");
+      const progressSection = document.getElementById("progressSection");
+      const progressFill = document.getElementById("progressFill");
+      const progressPercent = document.getElementById("progressPercent");
+      const progressStatus = document.getElementById("progressStatus");
+      const resultCard = document.getElementById("resultCard");
+      const resultHeader = document.getElementById("resultHeader");
+      const resultIcon = document.getElementById("resultIcon");
+      const resultTitle = document.getElementById("resultTitle");
+      const resultMessage = document.getElementById("resultMessage");
+      const resultDetails = document.getElementById("resultDetails");
+
+      function formatBytes(bytes) {
+        if (bytes === 0) return "0 Bytes";
+        const k = 1024;
+        const sizes = ["Bytes", "KB", "MB", "GB"];
+        const i = Math.floor(Math.log(bytes) / Math.log(k));
+        return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
+      }
+
+      function clearResult() {
+        resultCard.className = "result-card";
+        resultCard.style.display = "none";
+        resultMessage.textContent = "";
+        resultDetails.innerHTML = "";
+      }
+
+      function showResult(type, title, message, detailsObj) {
+        resultCard.className = "result-card active " + type;
+        resultTitle.textContent = title;
+        resultIcon.innerHTML = type === "success" ? "&#10003;" : (type === "duplicate" ? "&#9888;" : "&#10007;");
+        resultMessage.textContent = message;
+        resultDetails.innerHTML = "";
+
+        if (detailsObj) {
+          for (const [key, val] of Object.entries(detailsObj)) {
+            const labelEl = document.createElement("div");
+            labelEl.className = "result-label";
+            labelEl.textContent = key;
+
+            const valEl = document.createElement("div");
+            valEl.className = "result-value";
+            if (typeof val === "object" && val.isHtml) {
+              valEl.innerHTML = val.content;
+            } else {
+              valEl.textContent = val;
+            }
+
+            resultDetails.appendChild(labelEl);
+            resultDetails.appendChild(valEl);
+          }
+        }
+      }
+
+      function handleFileSelection(file) {
+        clearResult();
+
+        if (!file) return;
+
+        // Validation 1: Extension check
+        if (!file.name.toLowerCase().endsWith(".pdf")) {
+          showResult("error", "Invalid File Extension", "Only PDF documents (.pdf) are supported for ingestion.", null);
+          resetFile();
+          return;
+        }
+
+        // Validation 2: Empty file
+        if (file.size === 0) {
+          showResult("error", "Empty File", "The selected file is empty (0 bytes).", null);
+          resetFile();
+          return;
+        }
+
+        // Validation 3: Size check
+        if (file.size > MAX_SIZE_BYTES) {
+          showResult(
+            "error",
+            "File Exceeds Size Limit",
+            `File size (${formatBytes(file.size)}) exceeds maximum allowed limit of 50 MB.`,
+            null
+          );
+          resetFile();
+          return;
+        }
+
+        selectedFile = file;
+        previewName.textContent = file.name;
+        previewSize.textContent = formatBytes(file.size);
+        filePreview.classList.add("active");
+        uploadBtn.disabled = false;
+      }
+
+      function resetFile() {
+        selectedFile = null;
+        fileInput.value = "";
+        filePreview.classList.remove("active");
+        uploadBtn.disabled = true;
+      }
+
+      // Drag & Drop event handlers
+      ["dragenter", "dragover"].forEach(eventName => {
+        dropzone.addEventListener(eventName, e => {
+          e.preventDefault();
+          e.stopPropagation();
+          dropzone.classList.add("dragover");
+        });
+      });
+
+      ["dragleave", "drop"].forEach(eventName => {
+        dropzone.addEventListener(eventName, e => {
+          e.preventDefault();
+          e.stopPropagation();
+          dropzone.classList.remove("dragover");
+        });
+      });
+
+      dropzone.addEventListener("drop", e => {
+        const dt = e.dataTransfer;
+        if (dt && dt.files && dt.files.length > 0) {
+          handleFileSelection(dt.files[0]);
+        }
+      });
+
+      dropzone.addEventListener("click", () => fileInput.click());
+      dropzone.addEventListener("keydown", e => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          fileInput.click();
+        }
+      });
+
+      fileInput.addEventListener("change", e => {
+        if (e.target.files && e.target.files.length > 0) {
+          handleFileSelection(e.target.files[0]);
+        }
+      });
+
+      removeFileBtn.addEventListener("click", () => {
+        resetFile();
+        clearResult();
+      });
+
+      // Upload Handler
+      uploadBtn.addEventListener("click", () => {
+        if (!selectedFile) return;
+
+        clearResult();
+        uploadBtn.disabled = true;
+        removeFileBtn.disabled = true;
+        progressSection.classList.add("active");
+        progressFill.style.width = "0%";
+        progressPercent.textContent = "0%";
+        progressStatus.textContent = "Uploading document...";
+
+        const formData = new FormData();
+        formData.append("file", selectedFile);
+
+        const xhr = new XMLHttpRequest();
+        xhr.open("POST", "/api/v1/documents/upload", true);
+
+        // Upload progress
+        xhr.upload.onprogress = e => {
+          if (e.lengthComputable) {
+            const percent = Math.round((e.loaded / e.total) * 100);
+            progressFill.style.width = percent + "%";
+            progressPercent.textContent = percent + "%";
+            if (percent >= 100) {
+              progressStatus.textContent = "Processing and indexing document...";
+            }
+          }
+        };
+
+        xhr.onload = () => {
+          progressSection.classList.remove("active");
+          uploadBtn.disabled = false;
+          removeFileBtn.disabled = false;
+
+          let responseData = null;
+          try {
+            responseData = JSON.parse(xhr.responseText);
+          } catch (e) {
+            responseData = { detail: xhr.responseText || `HTTP status ${xhr.status}` };
+          }
+
+          if (xhr.status === 201) {
+            const isDuplicate = !!responseData.is_duplicate;
+            const docId = responseData.document_id || "Unknown";
+            const details = {
+              "Document ID": {
+                isHtml: true,
+                content: `<span>${docId}</span> <button class="copy-btn" onclick="navigator.clipboard.writeText('${docId}')">Copy</button>`
+              },
+              "File Name": responseData.file_name || selectedFile.name,
+              "Storage URI": responseData.gcs_uri || "N/A",
+              "File Size": formatBytes(responseData.size_bytes || selectedFile.size),
+              "Ingestion Status": {
+                isHtml: true,
+                content: `<span class="badge ${isDuplicate ? 'badge-warning' : 'badge-success'}">${responseData.status || 'DISCOVERED'}</span>`
+              },
+              "Pub/Sub Queue": responseData.pubsub_notified ? "Delivered to topic" : "Warning: " + (responseData.pubsub_warning || "Pending reconciliation")
+            };
+
+            if (isDuplicate) {
+              showResult(
+                "duplicate",
+                "Document Already Registered",
+                responseData.message || "This exact document has already been uploaded and registered.",
+                details
+              );
+            } else {
+              showResult(
+                "success",
+                "Document Uploaded & Queued Successfully",
+                responseData.message || "Document successfully uploaded to GCS and queued for ingestion.",
+                details
+              );
+            }
+            resetFile();
+          } else {
+            // Error response
+            const errorMsg = responseData.detail || `Upload failed with status code ${xhr.status}`;
+            showResult("error", `Upload Failed (HTTP ${xhr.status})`, errorMsg, null);
+          }
+        };
+
+        xhr.onerror = () => {
+          progressSection.classList.remove("active");
+          uploadBtn.disabled = false;
+          removeFileBtn.disabled = false;
+          showResult("error", "Network Error", "Unable to connect to the ingestion server. Please check your connection and try again.", null);
+        };
+
+        xhr.send(formData);
+      });
+    })();
+  </script>
+</body>
+</html>
+

@@ -1,0 +1,14 @@
+name: gateway-url-map
+defaultService: https://www.googleapis.com/compute/v1/projects/xenon-broker-513704-s9/global/backendServices/gateway-backend-service
+hostRules:
+- hosts:
+  - gateway.enterprise.com
+  pathMatcher: ingestion-upload-matcher
+pathMatchers:
+- name: ingestion-upload-matcher
+  defaultService: https://www.googleapis.com/compute/v1/projects/xenon-broker-513704-s9/global/backendServices/gateway-backend-service
+  pathRules:
+  - paths:
+    - /upload
+    - /upload/*
+    service: https://www.googleapis.com/compute/v1/projects/xenon-broker-513704-s9/global/backendServices/ingestion-copilot-backend

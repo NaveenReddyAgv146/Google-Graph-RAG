@@ -1,0 +1,610 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Enterprise GraphRAG — Human Knowledge Review</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card-bg: #1e293b;
+      --card-border: #334155;
+      --primary: #38bdf8;
+      --primary-hover: #0284c7;
+      --success: #22c55e;
+      --warning: #f59e0b;
+      --danger: #ef4444;
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+      --border: #334155;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background-color: var(--bg);
+      color: var(--text);
+      display: flex;
+      height: 100vh;
+      overflow: hidden;
+    }
+    /* Sidebar Queue */
+    #sidebar {
+      width: 420px;
+      min-width: 380px;
+      background: var(--card-bg);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+    }
+    .sidebar-header {
+      padding: 1.25rem;
+      border-bottom: 1px solid var(--border);
+    }
+    .sidebar-header h1 {
+      font-size: 1.15rem;
+      font-weight: 700;
+      color: var(--primary);
+      margin-bottom: 0.75rem;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .filters {
+      display: flex;
+      gap: 0.5rem;
+    }
+    .filters select, .filters input {
+      flex: 1;
+      background: var(--bg);
+      color: var(--text);
+      border: 1px solid var(--border);
+      padding: 0.5rem;
+      border-radius: 6px;
+      font-size: 0.85rem;
+      outline: none;
+    }
+    .queue-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 0.75rem;
+    }
+    .card-item {
+      padding: 1rem;
+      background: rgba(15, 23, 42, 0.6);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      margin-bottom: 0.75rem;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+    .card-item:hover {
+      border-color: var(--primary);
+      background: rgba(30, 41, 59, 0.9);
+    }
+    .card-item.active {
+      border-color: var(--primary);
+      background: rgba(56, 189, 248, 0.1);
+      box-shadow: 0 0 0 1px var(--primary);
+    }
+    .card-item-title {
+      font-weight: 600;
+      font-size: 0.95rem;
+      margin-bottom: 0.35rem;
+      line-height: 1.3;
+    }
+    .card-item-doc {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      margin-bottom: 0.5rem;
+    }
+    .card-item-meta {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 0.75rem;
+    }
+    .badge {
+      display: inline-block;
+      padding: 0.2rem 0.5rem;
+      border-radius: 9999px;
+      font-weight: 600;
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .badge-pending { background: rgba(245, 158, 11, 0.2); color: var(--warning); border: 1px solid var(--warning); }
+    .badge-approved { background: rgba(34, 197, 94, 0.2); color: var(--success); border: 1px solid var(--success); }
+    .badge-rejected { background: rgba(239, 68, 68, 0.2); color: var(--danger); border: 1px solid var(--danger); }
+    .badge-draft { background: rgba(148, 163, 184, 0.2); color: var(--text-muted); border: 1px solid var(--border); }
+    .badge-changes { background: rgba(56, 189, 248, 0.2); color: var(--primary); border: 1px solid var(--primary); }
+
+    /* Main Review Pane */
+    #main {
+      flex: 1;
+      height: 100%;
+      overflow-y: auto;
+      padding: 2rem;
+      background: var(--bg);
+    }
+    .empty-state {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 70%;
+      color: var(--text-muted);
+    }
+    .detail-card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 1.75rem;
+      margin-bottom: 2rem;
+    }
+    .detail-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      margin-bottom: 1.25rem;
+      padding-bottom: 1.25rem;
+      border-bottom: 1px solid var(--border);
+    }
+    .detail-header-left h2 {
+      font-size: 1.35rem;
+      font-weight: 700;
+      color: var(--text);
+      margin-bottom: 0.25rem;
+    }
+    .field-group {
+      margin-bottom: 1.5rem;
+    }
+    .field-label {
+      font-size: 0.8rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      letter-spacing: 0.05em;
+      margin-bottom: 0.35rem;
+      display: flex;
+      justify-content: space-between;
+    }
+    .field-edit-link {
+      color: var(--primary);
+      cursor: pointer;
+      font-size: 0.75rem;
+      text-transform: none;
+    }
+    .field-value {
+      font-size: 0.95rem;
+      line-height: 1.5;
+      color: #e2e8f0;
+      background: rgba(15, 23, 42, 0.4);
+      padding: 0.85rem;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      white-space: pre-wrap;
+    }
+    .field-input {
+      width: 100%;
+      background: var(--bg);
+      color: var(--text);
+      border: 1px solid var(--primary);
+      padding: 0.85rem;
+      border-radius: 6px;
+      font-size: 0.95rem;
+      font-family: inherit;
+      resize: vertical;
+    }
+    /* Evidence Section */
+    .section-title {
+      font-size: 1.1rem;
+      font-weight: 700;
+      color: var(--text);
+      margin: 1.5rem 0 1rem 0;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .evidence-card {
+      background: rgba(15, 23, 42, 0.7);
+      border: 1px solid var(--border);
+      border-left: 4px solid var(--primary);
+      border-radius: 8px;
+      padding: 1rem;
+      margin-bottom: 1rem;
+    }
+    .evidence-meta {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      margin-bottom: 0.5rem;
+    }
+    .evidence-quote {
+      font-size: 0.9rem;
+      line-height: 1.45;
+      color: #f1f5f9;
+      background: rgba(0, 0, 0, 0.2);
+      padding: 0.75rem;
+      border-radius: 4px;
+      font-style: italic;
+    }
+    /* Action Controls */
+    .action-panel {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 1.5rem;
+      margin-bottom: 2rem;
+    }
+    .comment-box {
+      width: 100%;
+      background: var(--bg);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 0.75rem;
+      font-size: 0.9rem;
+      font-family: inherit;
+      min-height: 80px;
+      margin-bottom: 1rem;
+      resize: vertical;
+    }
+    .button-row {
+      display: flex;
+      gap: 0.75rem;
+      justify-content: flex-end;
+    }
+    button {
+      padding: 0.65rem 1.25rem;
+      font-weight: 600;
+      font-size: 0.9rem;
+      border-radius: 6px;
+      border: none;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      transition: background 0.15s;
+    }
+    .btn-approve { background: var(--success); color: white; }
+    .btn-approve:hover { background: #16a34a; }
+    .btn-reject { background: var(--danger); color: white; }
+    .btn-reject:hover { background: #dc2626; }
+    .btn-changes { background: var(--warning); color: #0f172a; }
+    .btn-changes:hover { background: #d97706; }
+    .btn-revoke { background: #dc2626; color: white; }
+    .btn-revoke:hover { background: #b91c1c; }
+    /* Audit History */
+    .audit-item {
+      padding: 0.75rem;
+      border-bottom: 1px solid var(--border);
+      font-size: 0.85rem;
+    }
+    .audit-item:last-child { border-bottom: none; }
+    .audit-header {
+      display: flex;
+      justify-content: space-between;
+      color: var(--text-muted);
+      margin-bottom: 0.25rem;
+    }
+    .audit-comment {
+      color: #e2e8f0;
+      margin-top: 0.25rem;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- SIDEBAR: QUEUE -->
+  <div id="sidebar">
+    <div class="sidebar-header">
+      <h1>🛡️ Knowledge Review</h1>
+      <div class="filters">
+        <select id="statusFilter" onchange="fetchQueue()">
+          <option value="">All Statuses</option>
+          <option value="PENDING" selected>Pending Review</option>
+          <option value="APPROVED">Approved</option>
+          <option value="REJECTED">Rejected</option>
+          <option value="CHANGES_REQUESTED">Changes Requested</option>
+          <option value="DRAFT">Legacy Draft</option>
+        </select>
+        <input type="text" id="searchInput" placeholder="Filter by project/doc..." oninput="filterCardsLocally()">
+      </div>
+    </div>
+    <div class="queue-list" id="queueList">
+      <div style="text-align: center; color: var(--text-muted); padding: 2rem;">Loading queue...</div>
+    </div>
+  </div>
+
+  <!-- MAIN DETAIL & ACTIONS -->
+  <div id="main">
+    <div id="emptyState" class="empty-state">
+      <svg width="48" height="48" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+      </svg>
+      <p style="margin-top: 1rem;">Select a SolutionCard from the review queue.</p>
+    </div>
+
+    <div id="detailView" style="display: none;">
+      <!-- CARD HEADER & METADATA -->
+      <div class="detail-card">
+        <div class="detail-header">
+          <div class="detail-header-left">
+            <h2 id="cardTitle">Project Title</h2>
+            <div style="font-size: 0.85rem; color: var(--text-muted);" id="cardDocInfo">Document Name</div>
+          </div>
+          <div id="cardStatusBadge"></div>
+        </div>
+
+        <!-- EDITABLE FIELDS -->
+        <div class="field-group">
+          <div class="field-label">
+            <span>Project Name</span>
+            <span class="field-edit-link" onclick="toggleEdit('project_name')">Edit</span>
+          </div>
+          <div id="val_project_name" class="field-value"></div>
+          <input type="text" id="input_project_name" class="field-input" style="display: none;">
+        </div>
+
+        <div class="field-group">
+          <div class="field-label">
+            <span>Business Problem</span>
+            <span class="field-edit-link" onclick="toggleEdit('business_problem')">Edit</span>
+          </div>
+          <div id="val_business_problem" class="field-value"></div>
+          <textarea id="input_business_problem" class="field-input" rows="3" style="display: none;"></textarea>
+        </div>
+
+        <div class="field-group">
+          <div class="field-label">
+            <span>Proposed Solution</span>
+            <span class="field-edit-link" onclick="toggleEdit('proposed_solution')">Edit</span>
+          </div>
+          <div id="val_proposed_solution" class="field-value"></div>
+          <textarea id="input_proposed_solution" class="field-input" rows="3" style="display: none;"></textarea>
+        </div>
+
+        <div class="field-group">
+          <div class="field-label">
+            <span>Implemented Solution</span>
+            <span class="field-edit-link" onclick="toggleEdit('implemented_solution')">Edit</span>
+          </div>
+          <div id="val_implemented_solution" class="field-value"></div>
+          <textarea id="input_implemented_solution" class="field-input" rows="3" style="display: none;"></textarea>
+        </div>
+
+        <div class="field-group">
+          <div class="field-label">
+            <span>Outcome</span>
+            <span class="field-edit-link" onclick="toggleEdit('outcome')">Edit</span>
+          </div>
+          <div id="val_outcome" class="field-value"></div>
+          <textarea id="input_outcome" class="field-input" rows="3" style="display: none;"></textarea>
+        </div>
+      </div>
+
+      <!-- GROUNDED EVIDENCE -->
+      <div class="section-title">
+        <span>🔍 Grounded Source Evidence (<span id="evidenceCount">0</span>)</span>
+      </div>
+      <div id="evidenceList"></div>
+
+      <!-- REVIEW ACTION PANEL -->
+      <div class="action-panel">
+        <h3 style="font-size: 1rem; margin-bottom: 0.75rem;">Submit Human Decision</h3>
+        <textarea id="reviewComment" class="comment-box" placeholder="Required for Reject or Request Changes; optional for Approve..."></textarea>
+        <div class="button-row" id="actionButtons">
+          <!-- Dynamically populated based on card status -->
+        </div>
+      </div>
+
+      <!-- AUDIT LOGS -->
+      <div class="detail-card">
+        <h3 style="font-size: 1rem; margin-bottom: 0.75rem;">📜 Audit History</h3>
+        <div id="auditList"></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let currentCards = [];
+    let activeCard = null;
+    let modifiedFields = {};
+
+    async function fetchQueue() {
+      const status = document.getElementById("statusFilter").value;
+      const url = status ? `/api/v1/reviews/cards?status=${status}` : `/api/v1/reviews/cards`;
+      try {
+        const res = await fetch(url);
+        currentCards = await res.json();
+        renderQueue(currentCards);
+      } catch (err) {
+        document.getElementById("queueList").innerHTML = `<div style="color: var(--danger); padding: 1rem;">Failed to load queue: ${err.message}</div>`;
+      }
+    }
+
+    function renderQueue(cards) {
+      const list = document.getElementById("queueList");
+      if (!cards.length) {
+        list.innerHTML = `<div style="text-align: center; color: var(--text-muted); padding: 2rem;">No cards found.</div>`;
+        return;
+      }
+      list.innerHTML = cards.map(c => `
+        <div class="card-item ${activeCard && activeCard.card_id === c.card_id ? 'active' : ''}" onclick="selectCard('${c.card_id}')">
+          <div class="card-item-title">${c.project_name || 'Untitled Solution'}</div>
+          <div class="card-item-doc">${c.document_name || c.document_id}</div>
+          <div class="card-item-meta">
+            <span class="badge badge-${c.verification_status.toLowerCase()}">${c.verification_status}</span>
+            <span style="color: var(--text-muted);">Evidence: ${c.evidence_count}</span>
+          </div>
+        </div>
+      `).join("");
+    }
+
+    function filterCardsLocally() {
+      const q = document.getElementById("searchInput").value.toLowerCase();
+      const filtered = currentCards.filter(c => 
+        (c.project_name && c.project_name.toLowerCase().includes(q)) ||
+        (c.document_name && c.document_name.toLowerCase().includes(q)) ||
+        c.card_id.toLowerCase().includes(q)
+      );
+      renderQueue(filtered);
+    }
+
+    async function selectCard(cardId) {
+      try {
+        const res = await fetch(`/api/v1/reviews/cards/${cardId}`);
+        activeCard = await res.json();
+        modifiedFields = {};
+        renderDetail(activeCard);
+        renderQueue(currentCards);
+      } catch (err) {
+        alert("Failed to fetch card details: " + err.message);
+      }
+    }
+
+    function renderDetail(card) {
+      document.getElementById("emptyState").style.display = "none";
+      document.getElementById("detailView").style.display = "block";
+
+      document.getElementById("cardTitle").innerText = card.project_name || "Untitled Solution";
+      document.getElementById("cardDocInfo").innerText = `${card.document_name || card.document_id} | ID: ${card.card_id}`;
+      document.getElementById("cardStatusBadge").innerHTML = `<span class="badge badge-${card.verification_status.toLowerCase()}">${card.verification_status}</span>`;
+
+      // Set values and reset edit inputs
+      const fields = ["project_name", "business_problem", "proposed_solution", "implemented_solution", "outcome"];
+      fields.forEach(f => {
+        const val = card[f] || "<None provided>";
+        document.getElementById(`val_${f}`).innerText = val;
+        document.getElementById(`val_${f}`).style.display = "block";
+        const input = document.getElementById(`input_${f}`);
+        input.value = card[f] || "";
+        input.style.display = "none";
+      });
+
+      // Evidence list
+      document.getElementById("evidenceCount").innerText = card.evidence_links.length;
+      const evList = document.getElementById("evidenceList");
+      if (!card.evidence_links.length) {
+        evList.innerHTML = `<div style="color: var(--text-muted); font-size: 0.9rem;">No grounded citations linked to this card.</div>`;
+      } else {
+        evList.innerHTML = card.evidence_links.map(e => `
+          <div class="evidence-card">
+            <div class="evidence-meta">
+              <span><b>Doc:</b> ${e.document_name || e.document_id} ${e.slide_number ? '| Slide ' + e.slide_number : ''} ${e.page_number ? '| Page ' + e.page_number : ''}</span>
+              <span>Modality: ${e.modality || 'TEXT'}</span>
+            </div>
+            <div class="evidence-quote">"${e.source_chunk_text || e.note || 'No verbatim text'}"</div>
+            ${e.note ? `<div style="font-size: 0.75rem; color: var(--text-muted); margin-top: 0.35rem;">Citation Note: ${e.note}</div>` : ''}
+          </div>
+        `).join("");
+      }
+
+      // Action buttons based on status
+      const btnRow = document.getElementById("actionButtons");
+      if (card.verification_status === "REJECTED") {
+        btnRow.innerHTML = `<span style="color: var(--danger); font-size: 0.9rem;">Card is in terminal REJECTED state and cannot be reactivated.</span>`;
+      } else if (card.verification_status === "APPROVED") {
+        btnRow.innerHTML = `<button class="btn-revoke" onclick="submitDecision('revoke')">Revoke Approval</button>`;
+      } else {
+        btnRow.innerHTML = `
+          <button class="btn-changes" onclick="submitDecision('request-changes')">Request Changes</button>
+          <button class="btn-reject" onclick="submitDecision('reject')">Reject</button>
+          <button class="btn-approve" onclick="submitDecision('approve')">Approve</button>
+        `;
+      }
+
+      // Audit list
+      const auditContainer = document.getElementById("auditList");
+      if (!card.review_history.length) {
+        auditContainer.innerHTML = `<div style="color: var(--text-muted); font-size: 0.85rem;">No review actions recorded yet.</div>`;
+      } else {
+        auditContainer.innerHTML = card.review_history.map(r => `
+          <div class="audit-item">
+            <div class="audit-header">
+              <span><b>${r.reviewer_email}</b> performed <b>${r.action}</b> (${r.previous_status} &rarr; ${r.new_status})</span>
+              <span>${r.reviewed_at}</span>
+            </div>
+            ${r.comments ? `<div class="audit-comment">"${r.comments}"</div>` : ''}
+          </div>
+        `).join("");
+      }
+    }
+
+    function toggleEdit(fieldName) {
+      const valDiv = document.getElementById(`val_${fieldName}`);
+      const input = document.getElementById(`input_${fieldName}`);
+      if (input.style.display === "none") {
+        input.style.display = "block";
+        valDiv.style.display = "none";
+        input.focus();
+      } else {
+        input.style.display = "none";
+        valDiv.style.display = "block";
+        if (input.value !== (activeCard[fieldName] || "")) {
+          modifiedFields[fieldName] = input.value;
+          valDiv.innerText = input.value + " (Edited)";
+          valDiv.style.borderColor = "var(--primary)";
+        }
+      }
+    }
+
+    async function submitDecision(actionEndpoint) {
+      if (!activeCard) return;
+
+      const comment = document.getElementById("reviewComment").value.trim();
+      if ((actionEndpoint === "reject" || actionEndpoint === "request-changes" || actionEndpoint === "revoke") && !comment) {
+        alert("A comment is strictly mandatory for " + actionEndpoint.toUpperCase());
+        return;
+      }
+
+      // Flush any open input field edits
+      ["project_name", "business_problem", "proposed_solution", "implemented_solution", "outcome"].forEach(f => {
+        const input = document.getElementById(`input_${f}`);
+        if (input && input.style.display !== "none" && input.value !== (activeCard[f] || "")) {
+          modifiedFields[f] = input.value;
+        }
+      });
+
+      const fieldEdits = Object.entries(modifiedFields).map(([name, newVal]) => ({
+        field_name: name,
+        old_value: activeCard[name],
+        new_value: newVal
+      }));
+
+      const payload = {
+        comments: comment,
+        field_edits: fieldEdits,
+        client_metadata: { source: "web_ui" },
+        idempotency_key: "web_" + Date.now() + "_" + Math.random().toString(36).substring(7)
+      };
+
+      try {
+        const res = await fetch(`/api/v1/reviews/cards/${activeCard.card_id}/${actionEndpoint}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data.detail || "Server returned " + res.status);
+        }
+
+        alert(data.message || "Action completed successfully");
+        document.getElementById("reviewComment").value = "";
+        await selectCard(activeCard.card_id);
+        await fetchQueue();
+      } catch (err) {
+        alert("Error executing review decision: " + err.message);
+      }
+    }
+
+    // Initial load
+    fetchQueue();
+  </script>
+</body>
+</html>
+

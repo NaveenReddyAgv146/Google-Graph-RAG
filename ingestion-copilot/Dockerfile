@@ -17,13 +17,20 @@ FROM python:3.12-slim
 # Install uv
 COPY --from=ghcr.io/astral-sh/uv:0.8.13 /uv /uvx /bin/
 
-WORKDIR /code
+WORKDIR /workspace
 
-COPY ./pyproject.toml ./README.md ./uv.lock* ./
+# Copy root workspace configuration and lockfile
+COPY pyproject.toml README.md uv.lock ./
+# Copy workspace members required for ingestion-copilot
+COPY common ./common
+COPY ingestion-copilot ./ingestion-copilot
+COPY scripts ./scripts
 
-COPY ./app ./app
+# Set working directory to ingestion-copilot package
+WORKDIR /workspace/ingestion-copilot
 
-RUN uv sync --frozen
+# Synchronize workspace dependencies for ingestion-copilot package
+RUN uv sync --frozen --package ingestion-copilot
 
 ARG AGENT_VERSION=0.0.0
 ENV AGENT_VERSION=${AGENT_VERSION}

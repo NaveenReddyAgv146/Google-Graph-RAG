@@ -1,0 +1,313 @@
+{
+  "description": "Comprehensive evaluation dataset for Discovery Copilot Phase 4.4 covering single-turn, multi-turn follow-ups, pronoun resolution, multi-customer comparison, negative evidence, and citation verification.",
+  "eval_cases": [
+    {
+      "eval_case_id": "tc01_solution_discovery_uber",
+      "turns": [
+        {
+          "turn_id": 1,
+          "prompt": "Show me Uber's payment architecture and how they handle high-throughput transactions.",
+          "expected_intent": "SOLUTION_DISCOVERY",
+          "expected_entities": {
+            "customers": ["Uber"],
+            "technologies": ["Cloud Spanner"]
+          },
+          "expected_card_ids": ["card_001"],
+          "expected_behavior": "Must retrieve approved Uber solution cards and cite Cloud Spanner."
+        }
+      ]
+    },
+    {
+      "eval_case_id": "tc02_follow_up_customer_pronoun",
+      "turns": [
+        {
+          "turn_id": 1,
+          "prompt": "Tell me about Uber's global ledger architecture.",
+          "expected_intent": "SOLUTION_DISCOVERY",
+          "expected_entities": {
+            "customers": ["Uber"]
+          },
+          "expected_card_ids": ["card_001"]
+        },
+        {
+          "turn_id": 2,
+          "prompt": "What database did they use for that?",
+          "expected_intent": "FOLLOW_UP",
+          "expected_resolved_customer": "Uber",
+          "expected_resolved_card_id": "card_001",
+          "expected_behavior": "Resolves 'they' to Uber, 'that' to Uber's ledger architecture, and inspects card_001."
+        }
+      ]
+    },
+    {
+      "eval_case_id": "tc03_follow_up_availability_metric",
+      "turns": [
+        {
+          "turn_id": 1,
+          "prompt": "What architecture does Canva use for collaborative design storage?",
+          "expected_intent": "SOLUTION_DISCOVERY",
+          "expected_entities": {
+            "customers": ["Canva"]
+          },
+          "expected_card_ids": ["card_002"]
+        },
+        {
+          "turn_id": 2,
+          "prompt": "What availability metrics did they achieve with it?",
+          "expected_intent": "FOLLOW_UP",
+          "expected_resolved_customer": "Canva",
+          "expected_resolved_card_id": "card_002",
+          "expected_behavior": "Resolves 'they' to Canva, 'it' to collaborative storage, and cites card_002 with verbatim availability metrics."
+        }
+      ]
+    },
+    {
+      "eval_case_id": "tc04_evidence_verification_followup",
+      "turns": [
+        {
+          "turn_id": 1,
+          "prompt": "Show me Dropbox's multi-region file synchronization implementation.",
+          "expected_intent": "SOLUTION_DISCOVERY",
+          "expected_entities": {
+            "customers": ["Dropbox"]
+          },
+          "expected_card_ids": ["card_003"]
+        },
+        {
+          "turn_id": 2,
+          "prompt": "Show me the exact quote and slide citation for that claim.",
+          "expected_intent": "EVIDENCE_VERIFICATION",
+          "expected_resolved_customer": "Dropbox",
+          "expected_resolved_card_id": "card_003",
+          "expected_behavior": "Executes get_solution_evidence_detail on card_003 and returns exact quote and slide anchor."
+        }
+      ]
+    },
+    {
+      "eval_case_id": "tc05_multi_customer_comparison_ambiguity",
+      "turns": [
+        {
+          "turn_id": 1,
+          "prompt": "Compare Uber and Canva's database architecture.",
+          "expected_intent": "COMPARISON",
+          "expected_entities": {
+            "customers": ["Uber", "Canva"],
+            "technologies": ["Cloud Spanner"]
+          },
+          "expected_card_ids": ["card_001", "card_002"],
+          "expected_behavior": "Decomposes into two retrieval subtasks for Uber and Canva."
+        },
+        {
+          "turn_id": 2,
+          "prompt": "What was their latency?",
+          "expected_intent": "CLARIFICATION_NEEDED",
+          "expected_ambiguous": true,
+          "expected_behavior": "Proactively clarifies which customer's latency is requested (Uber or Canva) rather than guessing."
+        }
+      ]
+    },
+    {
+      "eval_case_id": "tc06_technical_lookup_spanner",
+      "turns": [
+        {
+          "turn_id": 1,
+          "prompt": "Which verified solutions use Google Cloud Spanner?",
+          "expected_intent": "TECHNICAL_LOOKUP",
+          "expected_entities": {
+            "technologies": ["Cloud Spanner"]
+          },
+          "expected_behavior": "Traverses Spanner KnowledgeGraph for solutions connected to canonical Cloud Spanner."
+        }
+      ]
+    },
+    {
+      "eval_case_id": "tc07_negative_missing_rto_rpo",
+      "turns": [
+        {
+          "turn_id": 1,
+          "prompt": "What is the exact RTO and RPO for Uber's Spanner deployment?",
+          "expected_intent": "SOLUTION_DISCOVERY",
+          "expected_entities": {
+            "customers": ["Uber"],
+            "technologies": ["Cloud Spanner"]
+          },
+          "expected_behavior": "Must report missing RTO/RPO in insufficient_evidence_notes; zero hallucinated metrics.",
+          "expected_insufficient_evidence": true
+        }
+      ]
+    },
+    {
+      "eval_case_id": "tc08_projected_vs_achieved_modal",
+      "turns": [
+        {
+          "turn_id": 1,
+          "prompt": "Did Uber project or achieve sub-10ms p99 latency in their deployment?",
+          "expected_intent": "SOLUTION_DISCOVERY",
+          "expected_entities": {
+            "customers": ["Uber"]
+          },
+          "expected_behavior": "Preserves epistemic modality: projected latency is reported as target/projection, not confirmed achieved fact."
+        }
+      ]
+    },
+    {
+      "eval_case_id": "tc09_architecture_exploration_multi_hop",
+      "turns": [
+        {
+          "turn_id": 1,
+          "prompt": "Explore the topology of solutions connecting Kubernetes and Cloud Spanner.",
+          "expected_intent": "ARCHITECTURE_EXPLORATION",
+          "expected_entities": {
+            "technologies": ["Kubernetes", "Cloud Spanner"]
+          },
+          "expected_behavior": "Traverses graph connections between Kubernetes and Spanner."
+        }
+      ]
+    },
+    {
+      "eval_case_id": "tc10_unregistered_tech_fallback",
+      "turns": [
+        {
+          "turn_id": 1,
+          "prompt": "Show architectures utilizing CustomInternalStorageEngineX.",
+          "expected_intent": "SOLUTION_DISCOVERY",
+          "expected_behavior": "Searches via approved solution text search; strictly blocks canonical graph traversal for unknown tech."
+        }
+      ]
+    },
+    {
+      "eval_case_id": "tc11_empty_retrieval_safe_response",
+      "turns": [
+        {
+          "turn_id": 1,
+          "prompt": "Find approved customer solutions using QuantumTeleportationDB in Antarctica.",
+          "expected_intent": "SOLUTION_DISCOVERY",
+          "expected_behavior": "Returns clear insufficient-evidence explanation without fabricating customer solutions."
+        }
+      ]
+    },
+    {
+      "eval_case_id": "tc12_direct_card_id_lookup",
+      "turns": [
+        {
+          "turn_id": 1,
+          "prompt": "Inspect verbatim citations for card_001.",
+          "expected_intent": "EVIDENCE_VERIFICATION",
+          "expected_card_ids": ["card_001"],
+          "expected_behavior": "Directly invokes get_solution_evidence_detail for card_001."
+        }
+      ]
+    },
+    {
+      "eval_case_id": "tc13_stale_revoked_card_followup",
+      "turns": [
+        {
+          "turn_id": 1,
+          "prompt": "Tell me about solution card_revoked_999.",
+          "expected_intent": "EVIDENCE_VERIFICATION",
+          "expected_card_ids": ["card_revoked_999"],
+          "expected_behavior": "Fails closed; relational check rejects non-APPROVED card; reports no approved evidence."
+        }
+      ]
+    },
+    {
+      "eval_case_id": "tc14_ambiguous_generic_prompt",
+      "turns": [
+        {
+          "turn_id": 1,
+          "prompt": "How does it work?",
+          "expected_intent": "CLARIFICATION_NEEDED",
+          "expected_behavior": "Returns proactive clarification prompt with zero tool calls executed."
+        }
+      ]
+    },
+    {
+      "eval_case_id": "tc15_greeting_clarification",
+      "turns": [
+        {
+          "turn_id": 1,
+          "prompt": "Hello there",
+          "expected_intent": "CLARIFICATION_NEEDED",
+          "expected_behavior": "Clarification needed; guides user to enterprise architecture topics with zero tool calls."
+        }
+      ]
+    },
+    {
+      "eval_case_id": "tc16_multi_turn_technology_continuity",
+      "turns": [
+        {
+          "turn_id": 1,
+          "prompt": "How does Uber use Google Cloud Spanner?",
+          "expected_intent": "SOLUTION_DISCOVERY",
+          "expected_entities": {
+            "customers": ["Uber"],
+            "technologies": ["Cloud Spanner"]
+          }
+        },
+        {
+          "turn_id": 2,
+          "prompt": "Does that database support multi-region replication for them?",
+          "expected_intent": "FOLLOW_UP",
+          "expected_resolved_customer": "Uber",
+          "expected_resolved_tech": "Cloud Spanner",
+          "expected_behavior": "Resolves 'that database' to Cloud Spanner and 'them' to Uber."
+        }
+      ]
+    },
+    {
+      "eval_case_id": "tc17_multi_turn_three_step_drilldown",
+      "turns": [
+        {
+          "turn_id": 1,
+          "prompt": "What architectures are deployed at Dropbox?",
+          "expected_intent": "SOLUTION_DISCOVERY",
+          "expected_entities": {"customers": ["Dropbox"]}
+        },
+        {
+          "turn_id": 2,
+          "prompt": "What storage engines did they evaluate?",
+          "expected_intent": "FOLLOW_UP",
+          "expected_resolved_customer": "Dropbox"
+        },
+        {
+          "turn_id": 3,
+          "prompt": "Show me the proof for their final choice.",
+          "expected_intent": "EVIDENCE_VERIFICATION",
+          "expected_resolved_customer": "Dropbox",
+          "expected_behavior": "Maintains Dropbox customer continuity across 3 turns."
+        }
+      ]
+    },
+    {
+      "eval_case_id": "tc18_cross_session_isolation_test",
+      "turns": [
+        {
+          "turn_id": 1,
+          "prompt": "User A in Session 1 queries Uber architecture.",
+          "expected_behavior": "Session 1 memory holds Uber; Session 2 memory remains isolated and empty."
+        }
+      ]
+    },
+    {
+      "eval_case_id": "tc19_long_history_sliding_window_truncation",
+      "turns": [
+        {
+          "turn_id": 1,
+          "prompt": "Turn 1 through Turn 8 simulated conversation.",
+          "expected_behavior": "Window bounds context to last 6 turns and strictly caps character/token count."
+        }
+      ]
+    },
+    {
+      "eval_case_id": "tc20_cross_customer_evidence_misattribution_prevention",
+      "turns": [
+        {
+          "turn_id": 1,
+          "prompt": "Did Dropbox use Canva's multi-region template?",
+          "expected_intent": "COMPARISON",
+          "expected_behavior": "Citation validator strictly rejects assigning Canva chunk citations to Dropbox claims."
+        }
+      ]
+    }
+  ]
+}

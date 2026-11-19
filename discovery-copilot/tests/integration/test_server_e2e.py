@@ -47,7 +47,11 @@ RUN_SSE_URL = BASE_URL + "/run_sse"
 A2A_RPC_URL = BASE_URL + "/a2a/app/"
 AGENT_CARD_URL = A2A_RPC_URL + ".well-known/agent-card.json"
 
-HEADERS = {"Content-Type": "application/json"}
+TEST_USER_EMAIL = "integration-tester@enterprise.com"
+HEADERS = {
+    "Content-Type": "application/json",
+    "X-Enterprise-Test-Principal": TEST_USER_EMAIL,
+}
 # Streaming runs make several model calls (and tool calls such as web search);
 # the read timeout must cover the longest gap between streamed events.
 STREAM_TIMEOUT = 120
@@ -73,6 +77,7 @@ def start_server() -> subprocess.Popen[str]:
     ]
     env = os.environ.copy()
     env["INTEGRATION_TEST"] = "TRUE"
+    env["ENABLE_LOCAL_TEST_AUTH"] = "true"
     # Advertise a loopback URL so the A2A client can reach the card's transport.
     env["APP_URL"] = BASE_URL
     process = subprocess.Popen(
@@ -133,7 +138,7 @@ def server_fixture(request: Any) -> Iterator[subprocess.Popen[str]]:
 def test_adk_run_sse(server_fixture: subprocess.Popen[str]) -> None:
     """Test the native ADK route (/run_sse) end to end."""
     logger.info("Starting ADK /run_sse test")
-    user_id = f"user_{uuid.uuid4()}"
+    user_id = TEST_USER_EMAIL
     session_data = {"state": {"preferred_language": "English", "visit_count": 1}}
 
     session_response = requests.post(
@@ -181,7 +186,7 @@ def test_a2a_chat_stream(server_fixture: subprocess.Popen[str]) -> None:
     async def _stream() -> list[StreamResponse]:
         config = ClientConfig(
             streaming=True,
-            httpx_client=httpx.AsyncClient(timeout=STREAM_TIMEOUT),
+            httpx_client=httpx.AsyncClient(timeout=STREAM_TIMEOUT, headers=HEADERS),
         )
         client = await create_client(A2A_RPC_URL.rstrip("/"), config)
         message = Message(
@@ -251,7 +256,7 @@ def test_reasoning_engine_stream(server_fixture: subprocess.Popen[str]) -> None:
         headers=HEADERS,
         json={
             "class_method": "async_stream_query",
-            "input": {"user_id": f"u-{uuid.uuid4()}", "message": "Hi!"},
+            "input": {"user_id": TEST_USER_EMAIL, "message": "Hi!"},
         },
         stream=True,
         timeout=STREAM_TIMEOUT,
@@ -275,7 +280,7 @@ def test_reasoning_engine_sync_stream(server_fixture: subprocess.Popen[str]) -> 
         headers=HEADERS,
         json={
             "class_method": "stream_query",
-            "input": {"user_id": f"u-{uuid.uuid4()}", "message": "Hi!"},
+            "input": {"user_id": TEST_USER_EMAIL, "message": "Hi!"},
         },
         stream=True,
         timeout=STREAM_TIMEOUT,

@@ -23,6 +23,9 @@ import logging
 import os
 import sys
 
+# Ensure default Google Cloud project is set to avoid external gcloud CLI queries
+os.environ.setdefault("GOOGLE_CLOUD_PROJECT", "xenon-broker-513704-s9")
+
 # Ensure workspace packages are importable regardless of invocation directory
 _repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 _common_src = os.path.join(_repo_root, "common", "src")
@@ -77,6 +80,18 @@ def main() -> int:
         help="Bypass the four-point completion checkpoint and re-enrich the document",
     )
     parser.add_argument(
+        "--expected-mutations",
+        type=int,
+        default=None,
+        help="Enforce exact expected mutation count before persisting to Spanner or GCS",
+    )
+    parser.add_argument(
+        "--enriched-at",
+        type=str,
+        default=None,
+        help="Explicit immutable timezone-aware ISO-8601 timestamp for deterministic sidecar generation",
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -97,6 +112,8 @@ def main() -> int:
         document_id=doc_id,
         dry_run=args.dry_run,
         force_recompute=args.force_recompute,
+        expected_mutations=args.expected_mutations,
+        enriched_at=args.enriched_at,
     )
 
     report = format_enrichment_result_report(result)

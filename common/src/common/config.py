@@ -9,7 +9,16 @@ class Settings:
     """Project-wide configuration settings."""
 
     # Google Cloud Core Settings
-    project_id: str = os.getenv("GOOGLE_CLOUD_PROJECT", "xenon-broker-513704-s9")
+    # Note: Agent Runtime injects GOOGLE_CLOUD_PROJECT as numeric project number (e.g. 291679685305).
+    # Services such as Cloud Spanner require the alphanumeric Project ID for IAM evaluation.
+    project_id: str = (
+        os.getenv("PROJECT_ID")
+        or (
+            "xenon-broker-513704-s9"
+            if os.getenv("GOOGLE_CLOUD_PROJECT", "").isdigit()
+            else os.getenv("GOOGLE_CLOUD_PROJECT", "xenon-broker-513704-s9")
+        )
+    )
     region: str = os.getenv("GOOGLE_CLOUD_REGION", "asia-south1")
 
     # Cloud Spanner Graph

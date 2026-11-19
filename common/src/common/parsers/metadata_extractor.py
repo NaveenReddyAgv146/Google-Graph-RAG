@@ -18,7 +18,7 @@ from typing import Any, Callable, Iterable, Sequence
 from pydantic import BaseModel, Field
 
 from common.config import Settings, settings as global_settings
-from common.models.schema import ChunkNode, EntityNode, SolutionCardNode, TechnologyNode
+from common.models.schema import ChunkNode, ClaimCategory, EntityNode, SolutionCardNode, TechnologyNode
 from common.taxonomy import (
     MAX_ENTITY_CATEGORY_LENGTH,
     MAX_ENTITY_NAME_LENGTH,
@@ -94,6 +94,14 @@ class RawTechnologyCandidate(BaseModel):
     evidence_quote: str = Field(..., description="Verbatim quote from chunk text mentioning the technology")
 
 
+class RawClaimEvidenceCandidate(BaseModel):
+    """Candidate citation grounding a specific claim within a SolutionCard."""
+
+    claim_type: ClaimCategory = Field(..., description="The claim category: BUSINESS_PROBLEM, PROPOSED_SOLUTION, IMPLEMENTED_SOLUTION, or OUTCOME")
+    chunk_id: str = Field(..., description="Chunk ID providing evidence for this claim")
+    evidence_quote: str = Field(..., description="Verbatim quote from chunk text supporting this claim")
+
+
 class RawSolutionCardCandidate(BaseModel):
     """Raw business solution card candidate emitted by Gemini."""
 
@@ -104,6 +112,10 @@ class RawSolutionCardCandidate(BaseModel):
     outcome: str | None = Field(default=None, description="The business or technical outcome/result")
     chunk_id: str = Field(..., description="Primary chunk ID providing evidence for this solution")
     evidence_quote: str = Field(..., description="Verbatim quote from chunk text grounding the solution")
+    claim_evidence: list[RawClaimEvidenceCandidate] = Field(
+        default_factory=list,
+        description="Fine-grained claim citations for individual card claims.",
+    )
     technologies: list[str] = Field(default_factory=list, description="Technologies mentioned in this solution")
 
 
@@ -184,6 +196,14 @@ class ValidatedTechnology(BaseModel):
         )
 
 
+class ValidatedClaimEvidence(BaseModel):
+    """Validated citation grounding a specific claim within a SolutionCard."""
+
+    claim_type: ClaimCategory
+    chunk_id: str = Field(..., max_length=64)
+    evidence_quote: str
+
+
 class ValidatedSolutionCard(BaseModel):
     """Validated business solution card grounded in evidence."""
 
@@ -196,6 +216,10 @@ class ValidatedSolutionCard(BaseModel):
     outcome: str | None = None
     chunk_id: str = Field(..., max_length=64)
     evidence_quote: str
+    claim_evidence: list[ValidatedClaimEvidence] = Field(
+        default_factory=list,
+        description="Validated fine-grained claim citations for individual card claims.",
+    )
     technologies: list[str] = Field(default_factory=list, description="Associated canonical TechIds")
 
     def to_node(self) -> SolutionCardNode:
@@ -759,6 +783,41 @@ class MetadataExtractor:
 
             resolved_card_techs = sorted(set(resolved_card_techs))
 
+            # Validate claim-level evidence if provided
+            valid_claim_evidence: list[ValidatedClaimEvidence] = []
+            if cand.claim_evidence:
+                for ce in cand.claim_evidence:
+                    ce_text = chunks_map.get(ce.chunk_id)
+                    if ce_text is None:
+                        rejected_candidates.append(
+                            RejectedCandidate(
+                                candidate_type="claim_evidence",
+                                candidate_name=f"{cand.project_name} [{ce.claim_type}]",
+                                chunk_id=ce.chunk_id,
+                                evidence_quote=ce.evidence_quote,
+                                rejection_reason=f"ChunkId '{ce.chunk_id}' does not exist in document.",
+                            )
+                        )
+                        continue
+                    if not verify_evidence_quote(ce.evidence_quote, ce_text):
+                        rejected_candidates.append(
+                            RejectedCandidate(
+                                candidate_type="claim_evidence",
+                                candidate_name=f"{cand.project_name} [{ce.claim_type}]",
+                                chunk_id=ce.chunk_id,
+                                evidence_quote=ce.evidence_quote,
+                                rejection_reason=f"Claim quote for {ce.claim_type} not found in source chunk text.",
+                            )
+                        )
+                        continue
+                    valid_claim_evidence.append(
+                        ValidatedClaimEvidence(
+                            claim_type=ce.claim_type,
+                            chunk_id=ce.chunk_id,
+                            evidence_quote=ce.evidence_quote,
+                        )
+                    )
+
             card = ValidatedSolutionCard(
                 card_id=card_id,
                 document_id=document_id,
@@ -769,6 +828,7 @@ class MetadataExtractor:
                 outcome=cand.outcome.strip() if cand.outcome else None,
                 chunk_id=cand.chunk_id,
                 evidence_quote=cand.evidence_quote,
+                claim_evidence=valid_claim_evidence,
                 technologies=resolved_card_techs,
             )
             validated_cards[card_id] = card
@@ -836,8 +896,47 @@ class MetadataExtractor:
 
             rel_type = cand.relationship_type.strip().upper() if cand.relationship_type else "REFERENCES"
 
-            # Semantics check: normalize CALLS to CONNECTS_TO if evidence only describes connectivity/paths
+            norm_src_lower = src_name.lower()
+            norm_tgt_lower = tgt_name.lower()
             ev_lower = cand.evidence_quote.lower()
+
+            # Semantics check 1: reject relationships where evidence quote is merely a bare entity name
+            cleaned_ev_str = re.sub(r"[^\w\s]", "", ev_lower).strip()
+            if cleaned_ev_str in (re.sub(r"[^\w\s]", "", norm_src_lower).strip(), re.sub(r"[^\w\s]", "", norm_tgt_lower).strip()):
+                rejected_candidates.append(
+                    RejectedCandidate(
+                        candidate_type="relationship",
+                        candidate_name=f"{src_name} -> {tgt_name}",
+                        chunk_id=cand.chunk_id,
+                        evidence_quote=cand.evidence_quote,
+                        rejection_reason="Evidence quote is merely a bare entity name and contains no relational statement.",
+                    )
+                )
+                continue
+
+            # Semantics check 2: reject USES if source is merely a prefix or possessive modifier of target
+            # and evidence lacks active functional usage verbs (HAS_SUBSYSTEM is not an existing supported schema type).
+            if (
+                rel_type == "USES"
+                and (
+                    norm_tgt_lower.startswith(f"{norm_src_lower}'s ")
+                    or norm_tgt_lower.startswith(f"{norm_src_lower}’s ")
+                    or norm_tgt_lower.startswith(f"{norm_src_lower} ")
+                )
+                and not any(k in ev_lower for k in (f"{norm_src_lower} uses", f"{norm_src_lower} utilizes", f"{norm_src_lower} employs"))
+            ):
+                rejected_candidates.append(
+                    RejectedCandidate(
+                        candidate_type="relationship",
+                        candidate_name=f"{src_name} -> {tgt_name}",
+                        chunk_id=cand.chunk_id,
+                        evidence_quote=cand.evidence_quote,
+                        rejection_reason="Component/subsystem relationship not supported by USES; HAS_SUBSYSTEM is not an existing supported relationship type, so the relationship is omitted.",
+                    )
+                )
+                continue
+
+            # Semantics check 3: normalize CALLS to CONNECTS_TO if evidence only describes connectivity/paths
             if rel_type == "CALLS" and ("connect" in ev_lower or "path" in ev_lower) and not any(k in ev_lower for k in ("call", "invok", "rpc", "request", "api call")):
                 rel_type = "CONNECTS_TO"
 

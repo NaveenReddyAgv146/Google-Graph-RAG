@@ -39,6 +39,7 @@ from google.cloud import spanner
 from common.config import Settings, settings as global_settings
 from common.models.schema import (
     ChunkNode,
+    ClaimCategory,
     EntityNode,
     EntityReferencesEntityEdge,
     SolutionCardNode,
@@ -177,9 +178,20 @@ class EnrichmentWriteResult:
 # ============================================================================
 
 
-def generate_evidence_link_id(card_id: str, chunk_id: str, quote: str = "") -> str:
-    """Generate deterministic EvidenceId <= 64 chars."""
-    raw = f"{card_id}:{chunk_id}:{quote.strip()[:64]}"
+def generate_evidence_link_id(
+    card_id: str,
+    chunk_id: str,
+    quote: str = "",
+    claim_type: str | None = None,
+) -> str:
+    """Generate deterministic EvidenceId <= 64 chars.
+    
+    Preserves exact legacy hash when claim_type is None or empty.
+    """
+    if claim_type:
+        raw = f"{card_id}:{chunk_id}:{claim_type}:{quote.strip()[:64]}"
+    else:
+        raw = f"{card_id}:{chunk_id}:{quote.strip()[:64]}"
     digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:48]
     return f"evl_{digest}"
 
@@ -562,9 +574,9 @@ class EnrichmentWriter:
                 existing_status = existing[7]
                 existing_okf = existing[8]
 
-                # Invariant 6: Protect APPROVED cards from overwrite
-                if existing_status == "APPROVED":
-                    logger.info("SolutionCard '%s' has VerificationStatus='APPROVED'. Overwrite prevented.", cid)
+                # Invariant 6: Protect human-audited cards (APPROVED and REJECTED) from automated overwrite or reactivation
+                if existing_status in ("APPROVED", "REJECTED"):
+                    logger.info("SolutionCard '%s' has protected VerificationStatus='%s'. Overwrite and silent reactivation prevented.", cid, existing_status)
                     cards_protected += 1
                     cards_unchanged += 1
                     continue
@@ -800,24 +812,49 @@ class EnrichmentWriter:
         evidence_links_inserted = 0
         evidence_links_unchanged = 0
 
-        evidence_link_candidates: list[tuple[str, str, str | None, str, int | None, int | None, str | None]] = []
+        evidence_link_candidates: list[tuple[str, str, str | None, str, int | None, int | None, str | None, str | None]] = []
         for card in payload.solution_cards:
             cid = card.card_id
-            chunk_id = getattr(card, "chunk_id", None)
-            quote = getattr(card, "evidence_quote", None) or ""
 
-            if chunk_id and chunk_id in doc_chunks:
-                chunk_rec = doc_chunks[chunk_id]
-                page_num = chunk_rec[3]
-                slide_num = chunk_rec[4]
+            # Check for fine-grained claim citations
+            claim_citations = getattr(card, "claim_evidence", None)
+            if claim_citations:
+                for ce in claim_citations:
+                    chunk_id = getattr(ce, "chunk_id", None)
+                    claim_type_raw = getattr(ce, "claim_type", None)
+                    claim_type_str = claim_type_raw.value if hasattr(claim_type_raw, "value") else (str(claim_type_raw) if claim_type_raw else None)
+                    quote = getattr(ce, "evidence_quote", None) or getattr(ce, "quote", "") or ""
+
+                    if chunk_id and chunk_id in doc_chunks:
+                        chunk_rec = doc_chunks[chunk_id]
+                        page_num = chunk_rec[3]
+                        slide_num = chunk_rec[4]
+                    else:
+                        page_num = None
+                        slide_num = None
+
+                    ev_id = generate_evidence_link_id(cid, chunk_id or "none", quote, claim_type=claim_type_str)
+                    evidence_link_candidates.append(
+                        (ev_id, cid, chunk_id, doc_id, page_num, slide_num, quote or None, claim_type_str)
+                    )
             else:
-                page_num = None
-                slide_num = None
+                chunk_id = getattr(card, "chunk_id", None)
+                quote = getattr(card, "evidence_quote", None) or ""
+                claim_type_raw = getattr(card, "claim_type", None)
+                claim_type_str = claim_type_raw.value if hasattr(claim_type_raw, "value") else (str(claim_type_raw) if claim_type_raw else None)
 
-            ev_id = generate_evidence_link_id(cid, chunk_id or "none", quote)
-            evidence_link_candidates.append(
-                (ev_id, cid, chunk_id, doc_id, page_num, slide_num, quote or None)
-            )
+                if chunk_id and chunk_id in doc_chunks:
+                    chunk_rec = doc_chunks[chunk_id]
+                    page_num = chunk_rec[3]
+                    slide_num = chunk_rec[4]
+                else:
+                    page_num = None
+                    slide_num = None
+
+                ev_id = generate_evidence_link_id(cid, chunk_id or "none", quote, claim_type=claim_type_str)
+                evidence_link_candidates.append(
+                    (ev_id, cid, chunk_id, doc_id, page_num, slide_num, quote or None, claim_type_str)
+                )
 
         if evidence_link_candidates:
             ev_ids = [c[0] for c in evidence_link_candidates]
@@ -835,11 +872,19 @@ class EnrichmentWriter:
             }
             ev_inserts = [c for c in evidence_link_candidates if c[0] not in existing_ev_ids]
             if ev_inserts:
-                transaction.insert(
-                    "EvidenceLinks",
-                    columns=["EvidenceId", "CardId", "ChunkId", "DocumentId", "PageNumber", "SlideNumber", "Note"],
-                    values=ev_inserts,
-                )
+                has_claim_types = any(c[7] is not None for c in ev_inserts)
+                if has_claim_types:
+                    transaction.insert(
+                        "EvidenceLinks",
+                        columns=["EvidenceId", "CardId", "ChunkId", "DocumentId", "PageNumber", "SlideNumber", "Note", "ClaimType"],
+                        values=ev_inserts,
+                    )
+                else:
+                    transaction.insert(
+                        "EvidenceLinks",
+                        columns=["EvidenceId", "CardId", "ChunkId", "DocumentId", "PageNumber", "SlideNumber", "Note"],
+                        values=[c[:7] for c in ev_inserts],
+                    )
                 evidence_links_inserted += len(ev_inserts)
             evidence_links_unchanged += len(evidence_link_candidates) - len(ev_inserts)
 

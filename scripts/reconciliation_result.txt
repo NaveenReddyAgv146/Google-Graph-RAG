@@ -1,0 +1,14 @@
+SHA256: c379116a059b5f1383d117ecd187c833fbbb0a8a7727991cd99e0d2d031c9f9c
+MUTATIONS: 34
+TABLES: 11
+  ChunkMentionsTech: 3
+  ChunkReferencesEntity: 5
+  Documents: 1
+  Entities: 5
+  EntityReferencesEntity: 1
+  EvidenceChunks: 10
+  EvidenceLinks: 1
+  SolutionCards: 1
+  SolutionImplementsDoc: 1
+  SolutionSupportsTech: 3
+  Technologies: 3

@@ -1,8 +1,49 @@
-"""Pydantic definitions for all 8 Node tables and 11 Edge tables in EnterpriseKnowledgeGraph."""
+"""Pydantic definitions for all 8 Node tables and 11 Edge tables in EnterpriseKnowledgeGraph, plus Review and Audit domain models."""
 
 from datetime import datetime
+from enum import Enum
+import re
+from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+
+# ============================================================================
+# REVIEW DOMAIN ENUMS & VALIDATORS
+# ============================================================================
+
+
+class VerificationStatus(str, Enum):
+    """Permitted verification statuses for SolutionCard in EnterpriseKnowledgeGraph."""
+
+    DRAFT = "DRAFT"
+    PENDING = "PENDING"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+    CHANGES_REQUESTED = "CHANGES_REQUESTED"
+
+
+class ReviewAction(str, Enum):
+    """Permitted human review actions."""
+
+    APPROVE = "APPROVE"
+    REJECT = "REJECT"
+    REQUEST_CHANGES = "REQUEST_CHANGES"
+    REVOKE = "REVOKE"
+
+
+class ClaimCategory(str, Enum):
+    """Permitted claim categories for claim-level EvidenceLinks."""
+
+    BUSINESS_PROBLEM = "BUSINESS_PROBLEM"
+    PROPOSED_SOLUTION = "PROPOSED_SOLUTION"
+    IMPLEMENTED_SOLUTION = "IMPLEMENTED_SOLUTION"
+    OUTCOME = "OUTCOME"
+
+
+# Regular expression for RFC 5322 simplified email validation (eliminates external email_validator dependency)
+EMAIL_REGEX = re.compile(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$")
+
 
 # ============================================================================
 # NODE MODELS
@@ -39,7 +80,11 @@ class ChunkNode(BaseModel):
 
 
 class SolutionCardNode(BaseModel):
-    """Business solution card representing a customer architecture or project."""
+    """Business solution card representing a customer architecture or project.
+
+    Preserves legacy DRAFT statuses. Does not use a default status that would
+    misrepresent existing or legacy records without an explicit status.
+    """
 
     card_id: str = Field(..., max_length=64)
     document_id: str = Field(..., max_length=256)
@@ -48,6 +93,11 @@ class SolutionCardNode(BaseModel):
     proposed_solution: str | None = None
     implemented_solution: str | None = None
     outcome: str | None = None
+    verification_status: VerificationStatus | None = Field(
+        None,
+        description="Current verification status. None/DRAFT for unverified/legacy cards, PENDING for extracted, APPROVED/REJECTED for audited.",
+    )
+    okf_uri: str | None = Field(None, max_length=1024)
 
 
 class VisualAssetNode(BaseModel):
@@ -100,6 +150,73 @@ class TechnologyNode(BaseModel):
     name: str = Field(..., max_length=256)
     category: str = Field(..., max_length=64)
     canonical_version: str | None = Field(None, max_length=64)
+
+
+class EvidenceLinkNode(BaseModel):
+    """Grounded evidence link connecting a SolutionCard to an EvidenceChunk."""
+
+    evidence_id: str = Field(..., max_length=64)
+    card_id: str = Field(..., max_length=64)
+    chunk_id: str | None = Field(None, max_length=64)
+    document_id: str = Field(..., max_length=256)
+    claim_type: ClaimCategory | None = Field(
+        default=None,
+        description="The specific card claim grounded by this citation (None for legacy links).",
+    )
+    page_number: int | None = None
+    slide_number: int | None = None
+    note: str | None = None
+
+
+# ============================================================================
+# AUDIT & REVIEW DOMAIN MODELS
+# ============================================================================
+
+
+class FieldEdit(BaseModel):
+    """Auditable field-level human modification."""
+
+    field_name: str
+    old_value: Any
+    new_value: Any
+
+
+class ReviewMetadataPayload(BaseModel):
+    """Structured audit metadata stored in ReviewMetadata JSON column."""
+
+    field_edits: list[FieldEdit] = Field(default_factory=list)
+    reason: str | None = None
+    client_info: dict[str, Any] = Field(default_factory=dict)
+
+
+class SolutionCardReviewNode(BaseModel):
+    """Immutable audit record for a human review action in SolutionCardReviews."""
+
+    card_id: str = Field(..., max_length=64)
+    review_id: str = Field(..., max_length=64)
+    reviewer_id: str = Field(
+        ...,
+        max_length=128,
+        description="Authenticated principal ID (e.g., subject/sub claim from verified token).",
+    )
+    reviewer_email: str = Field(
+        ...,
+        max_length=256,
+        description="Authenticated principal email address.",
+    )
+    action: ReviewAction
+    previous_status: VerificationStatus
+    new_status: VerificationStatus
+    comments: str | None = None
+    reviewed_at: datetime | None = None
+    review_metadata: ReviewMetadataPayload | None = None
+
+    @field_validator("reviewer_email")
+    @classmethod
+    def validate_email_format(cls, v: str) -> str:
+        if not EMAIL_REGEX.match(v):
+            raise ValueError(f"Invalid email address format: '{v}'")
+        return v.lower()
 
 
 # ============================================================================
@@ -160,3 +277,4 @@ class SourceFileCallsFileEdge(BaseModel):
 class SolutionImplementsDocEdge(BaseModel):
     card_id: str
     document_id: str
+

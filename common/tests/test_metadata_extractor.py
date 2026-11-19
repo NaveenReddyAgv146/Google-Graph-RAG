@@ -685,3 +685,181 @@ def test_relationship_calls_preserved_when_invocation_explicit():
     rel = result.relationships[0]
     assert rel.relationship_type == "CALLS"
 
+
+def test_possessive_component_uses_relationship_omitted_while_subsystem_uses_preserved():
+    """Verify YouTube --[USES]--> YouTube's video encoding back-end is omitted because HAS_SUBSYSTEM is unsupported, while backend --[USES]--> Flash Video is preserved."""
+    chunk_text = "Consumers upload their videos to YouTube. YouTube’s video encoding back-end converts uploaded videos to Flash Video."
+
+    raw_response = {
+        "entities": [
+            {
+                "name": "YouTube",
+                "category": "BUSINESS_UNIT",
+                "description": "Video platform",
+                "chunk_id": "chk_1",
+                "evidence_quote": "Consumers upload their videos to YouTube.",
+            },
+            {
+                "name": "YouTube's video encoding back-end",
+                "category": "SUBSYSTEM",
+                "description": "Encoding backend",
+                "chunk_id": "chk_1",
+                "evidence_quote": "YouTube’s video encoding back-end converts uploaded videos to Flash Video.",
+            },
+            {
+                "name": "Flash Video",
+                "category": "STANDARD",
+                "description": "Flash video format",
+                "chunk_id": "chk_1",
+                "evidence_quote": "YouTube’s video encoding back-end converts uploaded videos to Flash Video.",
+            },
+        ],
+        "technologies": [],
+        "solution_cards": [],
+        "relationships": [
+            # 1. Possessive component relationship with USES -> must be omitted
+            {
+                "source_entity_name": "YouTube",
+                "source_entity_category": "BUSINESS_UNIT",
+                "target_entity_name": "YouTube's video encoding back-end",
+                "target_entity_category": "SUBSYSTEM",
+                "relationship_type": "USES",
+                "chunk_id": "chk_1",
+                "evidence_quote": "YouTube’s video encoding back-end converts uploaded videos to Flash Video.",
+            },
+            # 2. Genuine functional USES relationship -> must be preserved
+            {
+                "source_entity_name": "YouTube's video encoding back-end",
+                "source_entity_category": "SUBSYSTEM",
+                "target_entity_name": "Flash Video",
+                "target_entity_category": "STANDARD",
+                "relationship_type": "USES",
+                "chunk_id": "chk_1",
+                "evidence_quote": "YouTube’s video encoding back-end converts uploaded videos to Flash Video.",
+            },
+        ],
+    }
+
+    mock_client = MagicMock()
+    mock_response = MagicMock()
+    mock_response.text = json.dumps(raw_response)
+    mock_client.models.generate_content.return_value = mock_response
+
+    extractor = MetadataExtractor(client=mock_client)
+    result = extractor.extract_from_chunk("chk_1", chunk_text, document_id="doc_yt")
+
+    # Only backend --[USES]--> Flash Video should remain
+    assert len(result.relationships) == 1
+    rel = result.relationships[0]
+    assert rel.source_name == "YouTube's video encoding back-end"
+    assert rel.target_name == "Flash Video"
+    assert rel.relationship_type == "USES"
+
+    # Verify YouTube -> YouTube's video encoding back-end is in rejected_candidates
+    rejected_rel = [r for r in result.rejected_candidates if r.candidate_type == "relationship"]
+    assert len(rejected_rel) == 1
+    assert "YouTube's video encoding back-end" in rejected_rel[0].candidate_name
+    assert "HAS_SUBSYSTEM is not an existing supported relationship type" in rejected_rel[0].rejection_reason
+
+
+def test_relationship_bare_entity_name_evidence_rejected():
+    """Verify relationships whose evidence is merely the bare entity name are rejected."""
+    chunk_text = "MELANIE PERKINS FOUNDER & DIRECTOR\nTHE CANVA TEAM\nCLIFF OBRECHT"
+    raw_response = {
+        "entities": [
+            {
+                "name": "The Canva Team",
+                "category": "BUSINESS_UNIT",
+                "description": "Founding team",
+                "chunk_id": "chk_team",
+                "evidence_quote": "THE CANVA TEAM",
+            },
+            {
+                "name": "CANVA",
+                "category": "BUSINESS_UNIT",
+                "description": "Company",
+                "chunk_id": "chk_team",
+                "evidence_quote": "THE CANVA TEAM",
+            },
+        ],
+        "technologies": [],
+        "solution_cards": [],
+        "relationships": [
+            {
+                "source_entity_name": "The Canva Team",
+                "source_entity_category": "BUSINESS_UNIT",
+                "target_entity_name": "CANVA",
+                "target_entity_category": "BUSINESS_UNIT",
+                "relationship_type": "REFERENCES",
+                "chunk_id": "chk_team",
+                "evidence_quote": "THE CANVA TEAM",
+            }
+        ],
+    }
+
+    mock_client = MagicMock()
+    mock_response = MagicMock()
+    mock_response.text = json.dumps(raw_response)
+    mock_client.models.generate_content.return_value = mock_response
+
+    extractor = MetadataExtractor(client=mock_client)
+    result = extractor.extract_from_chunk("chk_team", chunk_text, document_id="doc_canva")
+
+    # Relationship should be rejected
+    assert len(result.relationships) == 0
+    rejected = [r for r in result.rejected_candidates if r.candidate_type == "relationship"]
+    assert len(rejected) == 1
+    assert "bare entity name" in rejected[0].rejection_reason
+
+
+def test_relationship_subsystem_prefix_uses_rejected():
+    """Verify USES relationship where target has source prefix but quote lacks usage verbs is rejected."""
+    chunk_text = "With one click, the user will be lead straight to the CANVA editor where the user can customize."
+    raw_response = {
+        "entities": [
+            {
+                "name": "CANVA",
+                "category": "BUSINESS_UNIT",
+                "description": "Design platform",
+                "chunk_id": "chk_ed",
+                "evidence_quote": "CANVA editor",
+            },
+            {
+                "name": "CANVA editor",
+                "category": "SUBSYSTEM",
+                "description": "Editing subsystem",
+                "chunk_id": "chk_ed",
+                "evidence_quote": "the CANVA editor",
+            },
+        ],
+        "technologies": [],
+        "solution_cards": [],
+        "relationships": [
+            {
+                "source_entity_name": "CANVA",
+                "source_entity_category": "BUSINESS_UNIT",
+                "target_entity_name": "CANVA editor",
+                "target_entity_category": "SUBSYSTEM",
+                "relationship_type": "USES",
+                "chunk_id": "chk_ed",
+                "evidence_quote": "the user will be lead straight to the CANVA editor",
+            }
+        ],
+    }
+
+    mock_client = MagicMock()
+    mock_response = MagicMock()
+    mock_response.text = json.dumps(raw_response)
+    mock_client.models.generate_content.return_value = mock_response
+
+    extractor = MetadataExtractor(client=mock_client)
+    result = extractor.extract_from_chunk("chk_ed", chunk_text, document_id="doc_canva")
+
+    # Relationship should be rejected as component/subsystem unsupported by USES
+    assert len(result.relationships) == 0
+    rejected = [r for r in result.rejected_candidates if r.candidate_type == "relationship"]
+    assert len(rejected) == 1
+    assert "HAS_SUBSYSTEM is not an existing supported relationship type" in rejected[0].rejection_reason
+
+
+

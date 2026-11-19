@@ -109,6 +109,7 @@ class EnrichmentOrchestratorResult:
     error_message: str | None = None
     metadata_result: ExtractedMetadataResult | None = None
     projected_table_mutations: dict[str, int] = field(default_factory=dict)
+    enriched_at: str | None = None
 
 
 # ============================================================================
@@ -163,6 +164,8 @@ class EnrichmentOrchestrator:
         document_id: str,
         dry_run: bool = False,
         force_recompute: bool = False,
+        expected_mutations: int | None = None,
+        enriched_at: str | None = None,
     ) -> EnrichmentOrchestratorResult:
         """Execute the enrichment pipeline for a target document."""
         start_time = time.monotonic()
@@ -277,6 +280,23 @@ class EnrichmentOrchestrator:
                 clean_doc_id, eligible_chunks
             )
 
+            # Determine eligible canonical technologies and chunk mentions (matching writer persistence)
+            canonical_techs = {
+                getattr(t, "tech_id", None)
+                for t in metadata_result.technologies
+                if getattr(t, "is_canonical", True) and getattr(t, "tech_id", None)
+            }
+            canonical_tech_count = len(canonical_techs)
+
+            cmt_pairs = {
+                (getattr(t, "chunk_id", None), getattr(t, "tech_id", None))
+                for t in metadata_result.technologies
+                if getattr(t, "chunk_id", None)
+                and getattr(t, "tech_id", None)
+                and getattr(t, "is_canonical", True)
+            }
+            cmt_count = len(cmt_pairs)
+
             # ----------------------------------------------------------------
             # STAGE 4: EMBEDDING (768-DIM VERTEX AI EMBEDDINGS)
             # ----------------------------------------------------------------
@@ -298,63 +318,82 @@ class EnrichmentOrchestrator:
             sidecar_uri = f"gs://{bucket_name}/{sidecar_blob_name}"
             staging_blob_name = f"metadata/staging/{clean_doc_id}.meta.json.tmp"
 
+            if enriched_at is not None:
+                try:
+                    parsed_dt = datetime.fromisoformat(enriched_at)
+                    if parsed_dt.tzinfo is None:
+                        parsed_dt = parsed_dt.replace(tzinfo=timezone.utc)
+                    execution_enriched_at = parsed_dt.isoformat()
+                except Exception as exc:
+                    raise ValueError(f"Invalid enriched_at timestamp '{enriched_at}': {exc}") from exc
+            else:
+                execution_enriched_at = datetime.now(timezone.utc).isoformat()
+
             sidecar_bytes = self._build_sidecar_bytes(
                 clean_doc_id,
                 metadata_result,
                 chunk_embeddings_count=len(chunk_embeddings),
                 eligible_chunks_count=len(eligible_chunks),
+                enriched_at=execution_enriched_at,
             )
             sidecar_sha256 = hashlib.sha256(sidecar_bytes).hexdigest()
+
+            # ----------------------------------------------------------------
+            # PROJECTION CALCULATION & PREFLIGHT SAFETY GUARD
+            # ----------------------------------------------------------------
+            cre_count = sum(1 for e in metadata_result.entities if getattr(e, "chunk_id", None))
+            sst_count = sum(len(getattr(c, "technologies", [])) for c in metadata_result.solution_cards)
+            sid_count = len(metadata_result.solution_cards)
+            ere_count = len(metadata_result.relationships)
+            evl_count = len(metadata_result.solution_cards)
+
+            # Query existing cards in Spanner to include legacy cards requiring OkfUri alignment
+            legacy_card_updates = 0
+            if self.spanner_database:
+                try:
+                    with self.spanner_database.snapshot(multi_use=True) as snap:
+                        existing_cards_sql = "SELECT CardId, OkfUri FROM SolutionCards WHERE DocumentId = @doc_id"
+                        existing_rows = list(
+                            snap.execute_sql(
+                                existing_cards_sql,
+                                params={"doc_id": clean_doc_id},
+                                param_types={"doc_id": spanner.param_types.STRING},
+                            )
+                        )
+                        payload_cids = {c.card_id for c in metadata_result.solution_cards}
+                        canonical_okf = f"{sidecar_uri}#sha256={sidecar_sha256}"
+                        for ecid, eokf in existing_rows:
+                            if ecid not in payload_cids and eokf != canonical_okf:
+                                legacy_card_updates += 1
+                except Exception as exc:
+                    logger.debug("Existing cards inspection notice: %s", exc)
+
+            projected_table_mutations = {
+                "EvidenceChunks": len(chunk_embeddings),
+                "Entities": len(metadata_result.entities),
+                "Technologies": canonical_tech_count,
+                "SolutionCards": len(metadata_result.solution_cards) + legacy_card_updates,
+                "ChunkReferencesEntity": cre_count,
+                "ChunkMentionsTech": cmt_count,
+                "SolutionSupportsTech": sst_count,
+                "SolutionImplementsDoc": sid_count,
+                "EntityReferencesEntity": ere_count,
+                "EvidenceLinks": evl_count,
+                "Documents": 1,
+            }
+            projected_mutations = sum(projected_table_mutations.values())
+
+            # Enforce authorization guard: abort before staging upload or Spanner persistence if mismatch
+            if expected_mutations is not None and projected_mutations != expected_mutations:
+                raise RuntimeError(
+                    f"Preflight projected mutations ({projected_mutations}) differs from authorized expected count ({expected_mutations}). Aborting live write."
+                )
 
             # ----------------------------------------------------------------
             # DRY RUN BRANCH (SIMULATION ONLY)
             # ----------------------------------------------------------------
             if dry_run:
                 duration_ms = (time.monotonic() - start_time) * 1000.0
-
-                cre_count = sum(1 for e in metadata_result.entities if getattr(e, "chunk_id", None))
-                cmt_count = sum(1 for t in metadata_result.technologies if getattr(t, "chunk_id", None))
-                sst_count = sum(len(getattr(c, "technologies", [])) for c in metadata_result.solution_cards)
-                sid_count = len(metadata_result.solution_cards)
-                ere_count = len(metadata_result.relationships)
-                evl_count = len(metadata_result.solution_cards)
-
-                # Query existing cards in Spanner to include legacy cards requiring OkfUri alignment
-                legacy_card_updates = 0
-                if self.spanner_database:
-                    try:
-                        with self.spanner_database.snapshot(multi_use=True) as snap:
-                            existing_cards_sql = "SELECT CardId, OkfUri FROM SolutionCards WHERE DocumentId = @doc_id"
-                            existing_rows = list(
-                                snap.execute_sql(
-                                    existing_cards_sql,
-                                    params={"doc_id": clean_doc_id},
-                                    param_types={"doc_id": spanner.param_types.STRING},
-                                )
-                            )
-                            payload_cids = {c.card_id for c in metadata_result.solution_cards}
-                            canonical_okf = f"{sidecar_uri}#sha256={sidecar_sha256}"
-                            for ecid, eokf in existing_rows:
-                                if ecid not in payload_cids and eokf != canonical_okf:
-                                    legacy_card_updates += 1
-                    except Exception as exc:
-                        logger.debug("Dry-run existing cards inspection notice: %s", exc)
-
-                projected_table_mutations = {
-                    "EvidenceChunks": len(chunk_embeddings),
-                    "Entities": len(metadata_result.entities),
-                    "Technologies": len(metadata_result.technologies),
-                    "SolutionCards": len(metadata_result.solution_cards) + legacy_card_updates,
-                    "ChunkReferencesEntity": cre_count,
-                    "ChunkMentionsTech": cmt_count,
-                    "SolutionSupportsTech": sst_count,
-                    "SolutionImplementsDoc": sid_count,
-                    "EntityReferencesEntity": ere_count,
-                    "EvidenceLinks": evl_count,
-                    "Documents": 1,
-                }
-                projected_mutations = sum(projected_table_mutations.values())
-
                 logger.info(
                     "Dry-run simulation complete for '%s'. Zero writes committed to Spanner or GCS.",
                     clean_doc_id,
@@ -369,7 +408,7 @@ class EnrichmentOrchestrator:
                     excluded_image_chunks_count=len(excluded_image_chunks),
                     embeddings_generated_count=len(chunk_embeddings),
                     entities_count=len(metadata_result.entities),
-                    technologies_count=len(metadata_result.technologies),
+                    technologies_count=canonical_tech_count,
                     unresolved_technologies_count=len(metadata_result.unresolved_technologies),
                     solution_cards_count=len(metadata_result.solution_cards),
                     relationships_count=len(metadata_result.relationships),
@@ -380,6 +419,7 @@ class EnrichmentOrchestrator:
                     sidecar_uri=sidecar_uri,
                     sidecar_sha256=sidecar_sha256,
                     checkpoint_details=cp_details,
+                    enriched_at=execution_enriched_at,
                 )
 
             # Upload sidecar to staging
@@ -446,16 +486,19 @@ class EnrichmentOrchestrator:
                 excluded_image_chunks_count=len(excluded_image_chunks),
                 embeddings_generated_count=len(chunk_embeddings),
                 entities_count=len(metadata_result.entities),
-                technologies_count=len(metadata_result.technologies),
+                technologies_count=canonical_tech_count,
                 unresolved_technologies_count=len(metadata_result.unresolved_technologies),
                 solution_cards_count=len(metadata_result.solution_cards),
                 relationships_count=len(metadata_result.relationships),
                 evidence_links_count=len(metadata_result.solution_cards),
                 projected_mutations=write_result.total_mutations,
                 write_result=write_result,
+                metadata_result=metadata_result,
+                projected_table_mutations=projected_table_mutations,
                 sidecar_uri=sidecar_uri,
                 sidecar_sha256=sidecar_sha256,
                 checkpoint_details=cp_details,
+                enriched_at=execution_enriched_at,
             )
 
         except Exception as exc:
@@ -998,8 +1041,20 @@ class EnrichmentOrchestrator:
         metadata: ExtractedMetadataResult,
         chunk_embeddings_count: int,
         eligible_chunks_count: int,
+        enriched_at: str | None = None,
     ) -> bytes:
         """Construct the canonical JSON payload for the .meta.json sidecar."""
+        if enriched_at is not None:
+            try:
+                parsed_dt = datetime.fromisoformat(enriched_at)
+                if parsed_dt.tzinfo is None:
+                    parsed_dt = parsed_dt.replace(tzinfo=timezone.utc)
+                execution_enriched_at = parsed_dt.isoformat()
+            except Exception as exc:
+                raise ValueError(f"Invalid enriched_at timestamp '{enriched_at}': {exc}") from exc
+        else:
+            execution_enriched_at = datetime.now(timezone.utc).isoformat()
+
         citations = []
         for c in metadata.solution_cards:
             cid = c.card_id
@@ -1015,7 +1070,7 @@ class EnrichmentOrchestrator:
 
         data = {
             "document_id": document_id,
-            "enriched_at": datetime.now(timezone.utc).isoformat(),
+            "enriched_at": execution_enriched_at,
             "pipeline_stage": "Phase_3C_Enrichment",
             "eligible_chunks_count": eligible_chunks_count,
             "embeddings_generated_count": chunk_embeddings_count,
@@ -1158,6 +1213,8 @@ def format_enrichment_result_report(result: EnrichmentOrchestratorResult) -> str
             f"Destination URI:         {result.sidecar_uri}",
             f"SHA-256 Digest:          {result.sidecar_sha256 or 'N/A'}",
         ])
+        if result.enriched_at:
+            lines.append(f"Enriched At:             {result.enriched_at}")
 
     if result.write_result:
         wr = result.write_result
@@ -1208,13 +1265,31 @@ def format_enrichment_result_report(result: EnrichmentOrchestratorResult) -> str
                 lines.append(f"    Evidence: \"{e.evidence_quote}\"")
 
         if mr.technologies:
-            lines.extend([
-                "",
-                "--- Resolved Technologies ---",
-            ])
-            for t in mr.technologies:
-                lines.append(f"  * {t.canonical_name} (TechId: {t.tech_id}, Category: {t.category}, Chunk: {t.chunk_id})")
-                lines.append(f"    Raw: \"{t.raw_name}\" | Evidence: \"{t.evidence_quote}\"")
+            canonical_mr_techs = [
+                t for t in mr.technologies
+                if getattr(t, "is_canonical", True) and getattr(t, "tech_id", None)
+            ]
+            unresolved_mr_techs = [
+                t for t in mr.technologies
+                if not (getattr(t, "is_canonical", True) and getattr(t, "tech_id", None))
+            ]
+            if canonical_mr_techs:
+                lines.extend([
+                    "",
+                    "--- Resolved Technologies ---",
+                ])
+                for t in canonical_mr_techs:
+                    lines.append(f"  * {t.canonical_name} (TechId: {t.tech_id}, Category: {t.category}, Chunk: {t.chunk_id})")
+                    lines.append(f"    Raw: \"{t.raw_name}\" | Evidence: \"{t.evidence_quote}\"")
+
+            if unresolved_mr_techs:
+                lines.extend([
+                    "",
+                    "--- Unresolved Technologies ---",
+                ])
+                for t in unresolved_mr_techs:
+                    lines.append(f"  * Raw: \"{t.raw_name}\" (Chunk: {t.chunk_id})")
+                    lines.append(f"    Evidence: \"{t.evidence_quote}\"")
 
         if mr.solution_cards:
             lines.extend([

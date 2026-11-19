@@ -523,3 +523,56 @@ def test_slides_ingestion_spanner_failure_triggers_gcs_compensation():
     mock_uploader.compensate_upload_batch.assert_called_once_with(uploaded_assets)
     assert result.compensated_assets is not None
     assert len(result.compensated_assets["deleted"]) == 2
+
+
+def test_slides_ingestion_compensation_failure_tracks_orphans():
+    """Verifies that if GCS compensation fails (e.g. 403 Forbidden under objectCreator),
+    orphaned visual assets are tracked in OrphanAssetRegistry and reported on the result."""
+    from app.app_utils.orphan_tracker import orphan_tracker
+
+    orphan_tracker.clear()
+    raw_data = make_sample_raw_presentation()
+    expected_doc_id = f"doc_slide_{SAMPLE_PRES_ID}"
+
+    mock_client = MagicMock(spec=GoogleSlidesClient)
+    mock_client.get_presentation.return_value = raw_data
+    mock_client.get_slide_thumbnail.return_value = VALID_PNG_BYTES
+
+    uploaded_assets = make_mock_uploaded_assets(expected_doc_id, count=2, action="CREATED")
+    mock_uploader = MagicMock(spec=VisualAssetUploader)
+    mock_uploader.upload_presentation_assets.return_value = uploaded_assets
+    # Simulate GCS 403 Forbidden on deletion due to objectCreator least-privilege
+    mock_uploader.compensate_upload_batch.side_effect = RuntimeError(
+        "403 Forbidden: Missing storage.objects.delete on bucket sales-discovery-mvp-mumbai"
+    )
+
+    mock_txn = MockSpannerTransaction(
+        query_responses={
+            "FROM Documents": [],
+            "FROM EvidenceChunks": [
+                [f"{expected_doc_id}_s01_t001", "doc_OTHER", "Conflict", "TEXT", 1]
+            ],
+        }
+    )
+    mock_db = MockSpannerDatabase(mock_txn)
+
+    orchestrator = GoogleSlidesOrchestrator(
+        slides_client=mock_client,
+        asset_uploader=mock_uploader,
+        spanner_database=mock_db,
+    )
+
+    result = orchestrator.ingest_presentation(SAMPLE_PRES_ID)
+
+    assert result.status == SlidesIngestionStatus.FAILED
+    assert result.stage == SlidesIngestionStage.PERSISTING
+    assert len(result.orphaned_assets) == 2
+    assert "403 Forbidden" in result.compensation_error
+
+    # Verify registered in orphan_tracker
+    records = orphan_tracker.get_records()
+    assert len(records) == 1
+    assert records[0].document_id == expected_doc_id
+    assert records[0].presentation_id == SAMPLE_PRES_ID
+    assert len(records[0].gcs_uris) == 2
+
