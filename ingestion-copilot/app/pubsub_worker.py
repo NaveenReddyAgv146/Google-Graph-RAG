@@ -20,6 +20,8 @@ from google.cloud import pubsub_v1, spanner
 
 from common.config import settings
 from common.database.spanner import get_database
+from app.enrichment_orchestrator import EnrichmentOrchestrator, EnrichmentStatus
+from app.orchestrator import IngestionStatus, PdfIngestionOrchestrator
 
 logger = logging.getLogger("ingestion_copilot.pubsub_worker")
 
@@ -84,14 +86,23 @@ def publish_ingestion_event(
 def process_ingestion_event(
     event_payload: dict[str, Any],
     database: Any = None,
+    pdf_orchestrator: Any = None,
+    enrichment_orchestrator: Any = None,
 ) -> dict[str, Any]:
     """Worker event handler for DOCUMENT_UPLOADED Pub/Sub messages.
 
-    Invariants Enforced:
-    1. Idempotency: Checks whether document is already extracted (Status == 'EXTRACTION_COMPLETED'
-       or EvidenceChunks > 0). If so, returns SKIPPED_DUPLICATE to prevent duplicate Document AI calls.
-    2. Validates payload fields (event_type == 'DOCUMENT_UPLOADED', document_id, gcs_uri).
-    3. Dispatches to PdfIngestionOrchestrator to parse and persist chunks.
+    Workflow:
+    1. Idempotency & Recovery Check:
+       - If document is already fully enriched and verified, returns SKIPPED_DUPLICATE.
+       - If chunks already exist in Spanner, skips redundant PDF extraction and Document AI.
+    2. PDF Ingestion (if not already extracted):
+       - Parses layout and persists EvidenceChunks in Spanner.
+       - Returns BATCH_REQUIRED or FAILED if extraction does not succeed.
+    3. Automatic Enrichment (Phase 3C):
+       - Triggers EnrichmentOrchestrator to generate embeddings, extract metadata,
+         stage sidecar, atomically persist across 11 Spanner tables, and promote/verify canonical GCS sidecar.
+       - Recovers interrupted enrichment before invoking expensive model calls.
+       - Does not report completion if enrichment or sidecar verification fails.
     """
     event_type = event_payload.get("event_type")
     if event_type != "DOCUMENT_UPLOADED":
@@ -108,9 +119,13 @@ def process_ingestion_event(
 
     db = database or get_database()
 
-    # Idempotency check: Don't process if already extracted
+    enricher = enrichment_orchestrator or EnrichmentOrchestrator(spanner_database=db)
+
+    # 1. Spanner inspection: Check existing extraction, chunk count, and enrichment status
+    doc_status = None
+    chunk_count = 0
     try:
-        with db.snapshot() as snapshot:
+        with db.snapshot(multi_use=True) as snapshot:
             sql = """
             SELECT Status, (SELECT COUNT(1) FROM EvidenceChunks WHERE DocumentId = @doc_id)
             FROM Documents
@@ -124,20 +139,8 @@ def process_ingestion_event(
                 )
             )
             if rows:
-                doc_status, chunk_count = rows[0][0], rows[0][1]
-                if doc_status == "EXTRACTION_COMPLETED" or (chunk_count and chunk_count > 0):
-                    logger.info(
-                        "Document '%s' already extracted (%d chunks, status=%s). Skipping duplicate event.",
-                        doc_id,
-                        chunk_count or 0,
-                        doc_status,
-                    )
-                    return {
-                        "status": "SKIPPED_DUPLICATE",
-                        "document_id": doc_id,
-                        "chunks_count": chunk_count or 0,
-                        "message": "Document already extracted.",
-                    }
+                doc_status = rows[0][0]
+                chunk_count = rows[0][1] or 0
     except Exception as exc:
         logger.warning(
             "Spanner idempotency check failed for '%s': %s. Proceeding with caution.",
@@ -145,25 +148,137 @@ def process_ingestion_event(
             exc,
         )
 
-    # Invoke orchestrator
-    try:
-        from app.orchestrator import PdfIngestionOrchestrator
+    # 2. Duplicate delivery check for already completed and verified documents
+    if doc_status == "ENRICHED":
+        try:
+            is_complete, checkpoint_details = enricher.check_completion_checkpoint(doc_id)
+            if is_complete:
+                logger.info(
+                    "Document '%s' already fully enriched and verified (%d chunks, status=%s). Skipping duplicate event.",
+                    doc_id,
+                    chunk_count,
+                    doc_status,
+                )
+                return {
+                    "status": "SKIPPED_DUPLICATE",
+                    "stage": "COMPLETED",
+                    "document_id": doc_id,
+                    "chunks_count": chunk_count,
+                    "message": "Document already fully enriched and verified.",
+                }
+            logger.info(
+                "Document '%s' marked ENRICHED but completion checkpoint failed (%s). Proceeding with recovery.",
+                doc_id,
+                checkpoint_details,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Completion checkpoint inspection failed for '%s': %s. Proceeding with recovery.",
+                doc_id,
+                exc,
+            )
 
-        orchestrator = PdfIngestionOrchestrator(spanner_database=db)
-        result = orchestrator.ingest_pdf(gcs_uri)
-        return {
-            "status": result.status.value,
-            "stage": result.stage.value,
-            "document_id": result.document_id,
-            "chunks_count": result.chunks_count,
-            "error_message": result.error_message,
-        }
+    # 3. PDF Ingestion Phase (skip if chunks already exist in Spanner)
+    if chunk_count > 0 or doc_status in ("EXTRACTION_COMPLETED", "PROCESSED", "ENRICHED"):
+        logger.info(
+            "Document '%s' already has %d chunks in Spanner (status=%s). Skipping PDF extraction, proceeding directly to enrichment.",
+            doc_id,
+            chunk_count,
+            doc_status,
+        )
+        target_doc_id = doc_id
+        chunks_persisted = chunk_count
+    else:
+        try:
+            orchestrator = pdf_orchestrator or PdfIngestionOrchestrator(spanner_database=db)
+            ingest_result = orchestrator.ingest_pdf(gcs_uri)
+        except Exception as exc:
+            logger.exception("Worker ingestion failed for doc '%s': %s", doc_id, exc)
+            return {
+                "status": "FAILED",
+                "stage": "DOWNLOADING",
+                "document_id": doc_id,
+                "error": str(exc),
+            }
+
+        if ingest_result.status == IngestionStatus.BATCH_REQUIRED:
+            logger.warning(
+                "Document '%s' requires batch processing: %s",
+                doc_id,
+                ingest_result.error_message,
+            )
+            return {
+                "status": ingest_result.status.value,
+                "stage": ingest_result.stage.value,
+                "document_id": ingest_result.document_id,
+                "chunks_count": ingest_result.chunks_count,
+                "error_message": ingest_result.error_message,
+            }
+
+        if ingest_result.status != IngestionStatus.SUCCESS:
+            logger.error(
+                "Ingestion failed for doc '%s' at stage %s: %s",
+                doc_id,
+                ingest_result.stage.value,
+                ingest_result.error_message,
+            )
+            return {
+                "status": ingest_result.status.value,
+                "stage": ingest_result.stage.value,
+                "document_id": ingest_result.document_id,
+                "chunks_count": ingest_result.chunks_count,
+                "error_message": ingest_result.error_message,
+            }
+
+        target_doc_id = ingest_result.document_id or doc_id
+        chunks_persisted = ingest_result.chunks_count
+
+    # 4. Automatic Enrichment Phase
+    try:
+        enrich_result = enricher.run(target_doc_id)
     except Exception as exc:
-        logger.exception("Worker ingestion failed for doc '%s': %s", doc_id, exc)
+        logger.exception("Worker enrichment failed for doc '%s': %s", target_doc_id, exc)
         return {
             "status": "FAILED",
-            "document_id": doc_id,
+            "stage": "ENRICHMENT",
+            "document_id": target_doc_id,
+            "chunks_count": chunks_persisted,
             "error": str(exc),
+        }
+
+    if enrich_result.status in (EnrichmentStatus.SUCCESS, EnrichmentStatus.SKIPPED):
+        logger.info(
+            "Automatic enrichment succeeded for doc '%s' (status=%s, sidecar=%s)",
+            target_doc_id,
+            enrich_result.status.value,
+            enrich_result.sidecar_uri,
+        )
+        return {
+            "status": "SUCCESS",
+            "stage": "COMPLETED",
+            "document_id": target_doc_id,
+            "chunks_count": chunks_persisted,
+            "enrichment_status": enrich_result.status.value,
+            "embeddings_generated_count": enrich_result.embeddings_generated_count,
+            "entities_count": enrich_result.entities_count,
+            "technologies_count": enrich_result.technologies_count,
+            "solution_cards_count": enrich_result.solution_cards_count,
+            "sidecar_uri": enrich_result.sidecar_uri,
+            "sidecar_sha256": enrich_result.sidecar_sha256,
+        }
+    else:
+        logger.error(
+            "Automatic enrichment failed for doc '%s' at stage %s: %s",
+            target_doc_id,
+            enrich_result.stage.value if hasattr(enrich_result.stage, "value") else str(enrich_result.stage),
+            enrich_result.error_message,
+        )
+        return {
+            "status": "FAILED",
+            "stage": enrich_result.stage.value if hasattr(enrich_result.stage, "value") else str(enrich_result.stage),
+            "document_id": target_doc_id,
+            "chunks_count": chunks_persisted,
+            "error_message": enrich_result.error_message,
         }
 
 

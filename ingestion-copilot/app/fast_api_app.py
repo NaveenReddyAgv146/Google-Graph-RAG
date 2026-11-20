@@ -424,7 +424,20 @@ async def pubsub_push_handler(request: Request) -> dict[str, Any]:
         ) from exc
 
     database = get_database()
-    return process_ingestion_event(data_json, database=database)
+    result = process_ingestion_event(data_json, database=database)
+    if result.get("status") == "FAILED":
+        err_msg = result.get("error_message") or result.get("error") or "Worker processing failed"
+        logger.error(
+            "Pub/Sub processing failed for document '%s' at stage %s: %s",
+            result.get("document_id"),
+            result.get("stage"),
+            err_msg,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Pub/Sub processing failed: {err_msg}",
+        )
+    return result
 
 
 # Main execution

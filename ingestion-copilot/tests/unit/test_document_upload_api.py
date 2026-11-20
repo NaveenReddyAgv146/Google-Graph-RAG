@@ -371,8 +371,9 @@ def test_pubsub_push_unauthorized_service_account_returns_403():
 
 @patch("app.fast_api_app.extract_and_verify_pubsub_principal")
 @patch("app.fast_api_app.get_database")
-@patch("app.orchestrator.PdfIngestionOrchestrator")
-def test_pubsub_push_authenticated_oidc_success(mock_orch_cls, mock_get_db, mock_extract_sa):
+@patch("app.pubsub_worker.PdfIngestionOrchestrator")
+@patch("app.pubsub_worker.EnrichmentOrchestrator")
+def test_pubsub_push_authenticated_oidc_success(mock_enrich_cls, mock_orch_cls, mock_get_db, mock_extract_sa):
     """Valid Pub/Sub OIDC token executes ingestion pipeline successfully."""
     mock_extract_sa.return_value = AUTHORIZED_SA
     mock_db = MagicMock()
@@ -390,6 +391,29 @@ def test_pubsub_push_authenticated_oidc_success(mock_orch_cls, mock_get_db, mock
         status=IngestionStatus.SUCCESS,
         stage=IngestionStage.COMPLETED,
         chunks_count=10,
+    )
+
+    from app.enrichment_orchestrator import EnrichmentOrchestratorResult, EnrichmentStage, EnrichmentStatus
+    mock_enrich_inst = MagicMock()
+    mock_enrich_cls.return_value = mock_enrich_inst
+    mock_enrich_inst.run.return_value = EnrichmentOrchestratorResult(
+        document_id="doc_oidc_123",
+        status=EnrichmentStatus.SUCCESS,
+        stage=EnrichmentStage.COMPLETED,
+        dry_run=False,
+        duration_ms=10.0,
+        eligible_chunks_count=10,
+        excluded_image_chunks_count=0,
+        embeddings_generated_count=10,
+        entities_count=2,
+        technologies_count=2,
+        unresolved_technologies_count=0,
+        solution_cards_count=1,
+        relationships_count=1,
+        evidence_links_count=1,
+        projected_mutations=15,
+        sidecar_uri="gs://sales-discovery-mvp-mumbai/metadata/doc_oidc_123.meta.json",
+        sidecar_sha256="abc123hash",
     )
 
     event_payload = {
@@ -413,16 +437,23 @@ def test_pubsub_push_authenticated_oidc_success(mock_orch_cls, mock_get_db, mock
 
 @patch("app.fast_api_app.extract_and_verify_pubsub_principal")
 @patch("app.fast_api_app.get_database")
-@patch("app.orchestrator.PdfIngestionOrchestrator")
-def test_pubsub_push_endpoint_duplicate_skipped(mock_orch_cls, mock_get_db, mock_extract_sa):
-    """Duplicate Pub/Sub events for already-extracted documents are safely skipped without re-extraction."""
+@patch("app.pubsub_worker.PdfIngestionOrchestrator")
+@patch("app.pubsub_worker.EnrichmentOrchestrator")
+def test_pubsub_push_endpoint_enriched_duplicate_skipped(
+    mock_enrich_cls, mock_orch_cls, mock_get_db, mock_extract_sa
+):
+    """Fully enriched and checkpoint-verified documents return SKIPPED_DUPLICATE without model or ingest calls."""
     mock_extract_sa.return_value = AUTHORIZED_SA
     mock_db = MagicMock()
     mock_get_db.return_value = mock_db
     mock_snapshot = MagicMock()
     mock_db.snapshot.return_value.__enter__.return_value = mock_snapshot
-    # Document already has status EXTRACTION_COMPLETED and 15 chunks
-    mock_snapshot.execute_sql.return_value = [("EXTRACTION_COMPLETED", 15)]
+    # Document already has status ENRICHED and 15 chunks
+    mock_snapshot.execute_sql.return_value = [("ENRICHED", 15)]
+
+    mock_enrich_inst = MagicMock()
+    mock_enrich_cls.return_value = mock_enrich_inst
+    mock_enrich_inst.check_completion_checkpoint.return_value = (True, {"all_points_passed": True})
 
     event_payload = {
         "event_type": "DOCUMENT_UPLOADED",
@@ -442,6 +473,186 @@ def test_pubsub_push_endpoint_duplicate_skipped(mock_orch_cls, mock_get_db, mock
     assert data["document_id"] == "doc_dup_123"
     assert data["chunks_count"] == 15
     mock_orch_cls.assert_not_called()
+    mock_enrich_inst.run.assert_not_called()
+
+
+@patch("app.fast_api_app.extract_and_verify_pubsub_principal")
+@patch("app.fast_api_app.get_database")
+@patch("app.pubsub_worker.PdfIngestionOrchestrator")
+@patch("app.pubsub_worker.EnrichmentOrchestrator")
+def test_pubsub_push_endpoint_extraction_completed_invokes_enrichment(
+    mock_enrich_cls, mock_orch_cls, mock_get_db, mock_extract_sa
+):
+    """EXTRACTION_COMPLETED documents bypass PDF extraction and Document AI, invoking enrichment directly."""
+    mock_extract_sa.return_value = AUTHORIZED_SA
+    mock_db = MagicMock()
+    mock_get_db.return_value = mock_db
+    mock_snapshot = MagicMock()
+    mock_db.snapshot.return_value.__enter__.return_value = mock_snapshot
+    # Document already has status EXTRACTION_COMPLETED and 15 chunks
+    mock_snapshot.execute_sql.return_value = [("EXTRACTION_COMPLETED", 15)]
+
+    from app.enrichment_orchestrator import EnrichmentOrchestratorResult, EnrichmentStage, EnrichmentStatus
+    mock_enrich_inst = MagicMock()
+    mock_enrich_cls.return_value = mock_enrich_inst
+    mock_enrich_inst.run.return_value = EnrichmentOrchestratorResult(
+        document_id="doc_ext_123",
+        status=EnrichmentStatus.SUCCESS,
+        stage=EnrichmentStage.COMPLETED,
+        dry_run=False,
+        duration_ms=12.0,
+        eligible_chunks_count=15,
+        excluded_image_chunks_count=0,
+        embeddings_generated_count=15,
+        entities_count=3,
+        technologies_count=2,
+        unresolved_technologies_count=0,
+        solution_cards_count=2,
+        relationships_count=1,
+        evidence_links_count=2,
+        projected_mutations=20,
+        sidecar_uri="gs://sales-discovery-mvp-mumbai/metadata/doc_ext_123.meta.json",
+        sidecar_sha256="hash123",
+    )
+
+    event_payload = {
+        "event_type": "DOCUMENT_UPLOADED",
+        "document_id": "doc_ext_123",
+        "gcs_uri": "gs://sales-discovery-mvp-mumbai/raw/ext.pdf",
+    }
+    encoded_data = base64.b64encode(json.dumps(event_payload).encode("utf-8")).decode("utf-8")
+
+    res = CLIENT.post(
+        "/api/v1/pubsub/push",
+        headers={"Authorization": "Bearer valid.mock.jwt"},
+        json={"message": {"data": encoded_data, "messageId": "msg_ext"}},
+    )
+    assert res.status_code == 200
+    data = res.json()
+    assert data["status"] == "SUCCESS"
+    assert data["document_id"] == "doc_ext_123"
+    assert data["chunks_count"] == 15
+    # Crucial: PDF ingestion / Document AI was NOT called
+    mock_orch_cls.assert_not_called()
+    # Enrichment was invoked with the document id
+    mock_enrich_inst.run.assert_called_once_with("doc_ext_123")
+
+
+@patch("app.fast_api_app.extract_and_verify_pubsub_principal")
+@patch("app.fast_api_app.get_database")
+@patch("app.pubsub_worker.PdfIngestionOrchestrator")
+@patch("app.pubsub_worker.EnrichmentOrchestrator")
+def test_pubsub_push_endpoint_enrichment_failure_propagates_500_for_redelivery(
+    mock_enrich_cls, mock_orch_cls, mock_get_db, mock_extract_sa
+):
+    """Enrichment failure returns HTTP 500 to ensure Pub/Sub does not acknowledge and triggers redelivery."""
+    mock_extract_sa.return_value = AUTHORIZED_SA
+    mock_db = MagicMock()
+    mock_get_db.return_value = mock_db
+    mock_snapshot = MagicMock()
+    mock_db.snapshot.return_value.__enter__.return_value = mock_snapshot
+    mock_snapshot.execute_sql.return_value = [("EXTRACTION_COMPLETED", 15)]
+
+    from app.enrichment_orchestrator import EnrichmentOrchestratorResult, EnrichmentStage, EnrichmentStatus
+    mock_enrich_inst = MagicMock()
+    mock_enrich_cls.return_value = mock_enrich_inst
+    mock_enrich_inst.run.return_value = EnrichmentOrchestratorResult(
+        document_id="doc_fail_123",
+        status=EnrichmentStatus.FAILED,
+        stage=EnrichmentStage.PROMOTION,
+        dry_run=False,
+        duration_ms=8.0,
+        eligible_chunks_count=15,
+        excluded_image_chunks_count=0,
+        embeddings_generated_count=0,
+        entities_count=0,
+        technologies_count=0,
+        unresolved_technologies_count=0,
+        solution_cards_count=0,
+        relationships_count=0,
+        evidence_links_count=0,
+        projected_mutations=0,
+        error_message="Canonical sidecar verification failed",
+    )
+
+    event_payload = {
+        "event_type": "DOCUMENT_UPLOADED",
+        "document_id": "doc_fail_123",
+        "gcs_uri": "gs://sales-discovery-mvp-mumbai/raw/fail.pdf",
+    }
+    encoded_data = base64.b64encode(json.dumps(event_payload).encode("utf-8")).decode("utf-8")
+
+    res = CLIENT.post(
+        "/api/v1/pubsub/push",
+        headers={"Authorization": "Bearer valid.mock.jwt"},
+        json={"message": {"data": encoded_data, "messageId": "msg_fail"}},
+    )
+    # Must fail with 500 so Pub/Sub does not ACK the message
+    assert res.status_code == 500
+    assert "Pub/Sub processing failed" in res.json()["detail"]
+    assert "Canonical sidecar verification failed" in res.json()["detail"]
+
+
+@patch("app.fast_api_app.extract_and_verify_pubsub_principal")
+@patch("app.fast_api_app.get_database")
+@patch("app.pubsub_worker.PdfIngestionOrchestrator")
+@patch("app.pubsub_worker.EnrichmentOrchestrator")
+def test_pubsub_push_endpoint_enriched_invalid_checkpoint_triggers_recovery(
+    mock_enrich_cls, mock_orch_cls, mock_get_db, mock_extract_sa
+):
+    """ENRICHED documents with invalid checkpoint do not skip; they proceed to enrichment recovery."""
+    mock_extract_sa.return_value = AUTHORIZED_SA
+    mock_db = MagicMock()
+    mock_get_db.return_value = mock_db
+    mock_snapshot = MagicMock()
+    mock_db.snapshot.return_value.__enter__.return_value = mock_snapshot
+    mock_snapshot.execute_sql.return_value = [("ENRICHED", 10)]
+
+    from app.enrichment_orchestrator import EnrichmentOrchestratorResult, EnrichmentStage, EnrichmentStatus
+    mock_enrich_inst = MagicMock()
+    mock_enrich_cls.return_value = mock_enrich_inst
+    # Checkpoint fails
+    mock_enrich_inst.check_completion_checkpoint.return_value = (False, {"all_points_passed": False})
+    # Recovery run succeeds
+    mock_enrich_inst.run.return_value = EnrichmentOrchestratorResult(
+        document_id="doc_rec_123",
+        status=EnrichmentStatus.SUCCESS,
+        stage=EnrichmentStage.COMPLETED,
+        dry_run=False,
+        duration_ms=15.0,
+        eligible_chunks_count=10,
+        excluded_image_chunks_count=0,
+        embeddings_generated_count=0,
+        entities_count=1,
+        technologies_count=1,
+        unresolved_technologies_count=0,
+        solution_cards_count=1,
+        relationships_count=0,
+        evidence_links_count=1,
+        projected_mutations=0,
+        sidecar_uri="gs://sales-discovery-mvp-mumbai/metadata/doc_rec_123.meta.json",
+        sidecar_sha256="rec_hash",
+    )
+
+    event_payload = {
+        "event_type": "DOCUMENT_UPLOADED",
+        "document_id": "doc_rec_123",
+        "gcs_uri": "gs://sales-discovery-mvp-mumbai/raw/rec.pdf",
+    }
+    encoded_data = base64.b64encode(json.dumps(event_payload).encode("utf-8")).decode("utf-8")
+
+    res = CLIENT.post(
+        "/api/v1/pubsub/push",
+        headers={"Authorization": "Bearer valid.mock.jwt"},
+        json={"message": {"data": encoded_data, "messageId": "msg_rec"}},
+    )
+    assert res.status_code == 200
+    data = res.json()
+    assert data["status"] == "SUCCESS"
+    # PDF ingestion skipped
+    mock_orch_cls.assert_not_called()
+    # Enrichment recovery invoked
+    mock_enrich_inst.run.assert_called_once_with("doc_rec_123")
 
 
 # ============================================================================
